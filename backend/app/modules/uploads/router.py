@@ -25,7 +25,9 @@ async def upload(
     current_user: AuthUser = Depends(require_auth),
     db: AsyncSession = Depends(get_db),
 ):
-    await get_project(db, current_user.id, project_id)  # 404s if not owned by the user
+    project = await get_project(db, current_user.id, project_id)  # 404s if not owned by the user
+    if project.workspace is None:
+        raise AppError(409, "WORKSPACE_MISSING", "This project has no workspace to extract into")
 
     ext = os.path.splitext(file.filename or "")[1].lower()
     if ext not in ALLOWED_EXTENSIONS:
@@ -43,7 +45,7 @@ async def upload(
                 if written > _settings.MAX_UPLOAD_BYTES:
                     raise AppError(413, "FILE_TOO_LARGE", "Uploaded archive exceeds the configured limit")
                 out.write(chunk)
-        result = await store_project_archive(db, project_id, tmp_path, file.filename or "archive")
+        result = await store_project_archive(db, project_id, tmp_path, file.filename or "archive", project.workspace.rootPath)
     finally:
         if os.path.exists(tmp_path):
             os.remove(tmp_path)

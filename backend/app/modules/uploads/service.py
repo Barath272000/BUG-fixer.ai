@@ -11,10 +11,12 @@ from app.common.utils.safe_path import resolve_safe_path
 from app.core.config import settings
 from app.core.storage import project_storage_path
 from app.models.project import Project
+from app.modules.code_analysis.project_inspector import inspect_project
+from app.modules.uploads.zip_extractor import extract_archive
 
 
 async def store_project_archive(
-    db: AsyncSession, project_id: str, input_path: str, original_name: str
+    db: AsyncSession, project_id: str, input_path: str, original_name: str, workspace_root: str
 ) -> dict:
     size = os.path.getsize(input_path)
     if size > settings.MAX_UPLOAD_BYTES:
@@ -33,7 +35,27 @@ async def store_project_archive(
             dst.write(chunk)
     os.chmod(target, 0o640)
 
-    await db.execute(update(Project).where(Project.id == project_id).values(sourcePath=target))
+    # Unpack the archive straight into the project's workspace so the file tree,
+    # editor, and analysis pipeline all have something to actually work with —
+    # storing the .zip alone (the old behavior) left the workspace empty.
+    try:
+        await extract_archive(target, workspace_root)
+    except RuntimeError as exc:
+        raise AppError(422, "EXTRACTION_FAILED", f"Could not extract the uploaded archive: {exc}") from exc
+
+    inspection = await inspect_project(workspace_root)
+
+    await db.execute(
+        update(Project)
+        .where(Project.id == project_id)
+        .values(sourcePath=target, language=inspection["language"], framework=inspection["framework"])
+    )
     await db.commit()
 
-    return {"storagePath": target, "sha256": sha256.hexdigest()}
+    return {
+        "storagePath": target,
+        "sha256": sha256.hexdigest(),
+        "language": inspection["language"],
+        "framework": inspection["framework"],
+        "entryPoints": inspection["entryPoints"],
+    }

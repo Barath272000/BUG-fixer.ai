@@ -1,5 +1,6 @@
 """Mirrors: backend/src/modules/projects/project.service.ts + project.repository.ts"""
 import os
+import uuid
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,8 +32,15 @@ async def list_projects(db: AsyncSession, owner_id: str, page: int, limit: int):
 
     return {"items": items, "page": page, "limit": limit, "total": total}
 
-
 async def get_project(db: AsyncSession, owner_id: str, project_id: str) -> Project:
+    try:
+        uuid.UUID(project_id)
+    except ValueError:
+        # A malformed ID (not a UUID at all) is treated the same as "not
+        # found" rather than letting the DB reject it with a raw 500 —
+        # same outcome either way from the client's point of view.
+        raise AppError(404, "PROJECT_NOT_FOUND", "Project was not found")
+
     stmt = (
         select(Project)
         .where(Project.id == project_id, Project.ownerId == owner_id)

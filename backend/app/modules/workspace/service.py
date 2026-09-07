@@ -11,6 +11,7 @@ from app.common.errors.app_error import AppError
 from app.common.utils.safe_path import resolve_safe_path
 from app.models.context import Workspace
 from app.models.project import Project
+from app.modules.sandbox.sandbox_service import run_sandbox
 from app.modules.workspace.schemas import (
     ExecResult,
     GitStatusEntry,
@@ -133,16 +134,24 @@ async def create_folder(db: AsyncSession, user_id: str, workspace_id: str, path:
     return {"path": trimmed}
 
 
-# --- Terminal: runs inside the Docker sandbox (Phase 5). Interim: not yet available. ---
+# --- Terminal: runs inside the Docker sandbox module (app.modules.sandbox). ---
 async def exec_command(db: AsyncSession, user_id: str, workspace_id: str, command: str) -> ExecResult:
-    await workspace_for(db, user_id, workspace_id)
+    ws = await workspace_for(db, user_id, workspace_id)
     if not command.strip():
         raise AppError(400, "EMPTY_COMMAND", "Command is required")
-    raise AppError(
-        501,
-        "SANDBOX_NOT_AVAILABLE",
-        "The sandboxed terminal ships in Phase 5 (Docker sandbox module) of this conversion",
-    )
+    try:
+        result = await run_sandbox(ws.rootPath, command)
+    except FileNotFoundError as exc:
+        # `docker` CLI isn't installed / on PATH in this environment.
+        raise AppError(
+            503,
+            "SANDBOX_UNAVAILABLE",
+            "The sandboxed terminal needs Docker on the server (and /var/run/docker.sock mounted "
+            "into the backend/worker container, per docker-compose.yml). Docker isn't reachable here.",
+        ) from exc
+    except OSError as exc:
+        raise AppError(503, "SANDBOX_UNAVAILABLE", f"Could not start the sandbox container: {exc}") from exc
+    return ExecResult(stdout=result.stdout, stderr=result.stderr, code=result.code, durationMs=result.duration_ms)
 
 
 def _collect_searchable_files(root: str, current: str, depth: int, out: list[str]) -> None:

@@ -100,7 +100,7 @@ async def diagnose_bug(
     provider: str | None = None,
     model: str | None = None,
 ) -> dict:
-    resolved = await resolve_model(db, provider, model)
+    resolved = await resolve_model(db, provider, model, user_id)
     creds = await _credentials(db, user_id, resolved.provider)
     context = await build_ai_context(db, project_id, bug_id=bug_id)
 
@@ -137,17 +137,21 @@ async def copilot_reply(
     provider: str | None = None,
     model: str | None = None,
 ) -> dict:
-    resolved = await resolve_model(db, provider, model)
+    resolved = await resolve_model(db, provider, model, user_id)
     creds = await _credentials(db, user_id, resolved.provider)
     context = await build_ai_context(db, project_id, question=user_message) if project_id else "{}"
 
-    text = await _provider_for(resolved.provider).chat(
-        ChatRequest(
-            model=resolved.model,
-            system="You are a repository-aware coding copilot.",
-            user=build_copilot_prompt(context, user_message),
-            api_key=creds["key"],
-            base_url=creds["base_url"],
+    try:
+        text = await _provider_for(resolved.provider).chat(
+            ChatRequest(
+                model=resolved.model,
+                system="You are a repository-aware coding copilot.",
+                user=build_copilot_prompt(context, user_message),
+                api_key=creds["key"],
+                base_url=creds["base_url"],
+            )
         )
-    )
-    return {"provider": resolved.provider, "model": resolved.model, "result": _parse_json(text)}
+        result = _parse_json(text)
+    except ValueError as exc:
+        raise AppError(502, "AI_PROVIDER_ERROR", str(exc)) from exc
+    return {"provider": resolved.provider, "model": resolved.model, "result": result}

@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     DEFAULT_AI_MODEL: str = "gpt-4o-mini"
 
     ENCRYPTION_KEY: str = Field(min_length=32)
+    DEV_SKIP_AUTH: bool = False
     LOG_LEVEL: Literal[
         "fatal", "error", "warn", "info", "debug", "trace", "silent"
     ] = "info"

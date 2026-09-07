@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.common.errors.app_error import AppError
+from app.common.utils.ids import ensure_valid_id
 from app.models.bug import Bug
 from app.models.enums import BugStatus, Severity
 from app.models.fix import FixProposal
@@ -12,6 +13,7 @@ from app.modules.bugs.schemas import CreateBugRequest, UpdateBugRequest
 
 
 async def _assert_project_access(db: AsyncSession, owner_id: str, project_id: str) -> Project:
+    ensure_valid_id(project_id, field="projectId")
     result = await db.execute(
         select(Project).where(Project.id == project_id, Project.ownerId == owner_id)
     )
@@ -72,6 +74,7 @@ async def list_bugs(
 
 
 async def get_bug(db: AsyncSession, owner_id: str, bug_id: str) -> Bug:
+    ensure_valid_id(bug_id, field="bugId")
     stmt = (
         select(Bug)
         .join(Project, Bug.projectId == Project.id)

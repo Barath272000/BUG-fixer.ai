@@ -1,8 +1,12 @@
-"""Mirrors: backend/src/modules/copilot/copilot.service.ts
+"""
+Mirrors: backend/src/modules/copilot/copilot.service.ts
 
-Conversation/message persistence, plus real AI replies via
-app.modules.ai.service.copilot_reply. When the model returns a proposal,
-it's persisted as a CodeChangeProposal linked to the AI's message.
+Calls the real app.modules.ai.service.copilot_reply(), which resolves the
+provider/model, looks up the user's credential (or the env fallback),
+builds workspace-aware context, and returns {"answer": str, "proposal":
+dict | None}. The proposal, when present, is stored as a CodeChangeProposal
+row linked to the AI's message — the same row the frontend renders as an
+Apply/Reject diff card.
 """
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +18,11 @@ from app.models.enums import ProposalStatus
 from app.modules.ai.service import copilot_reply
 
 _MESSAGE_LOAD_OPTS = selectinload(CopilotConversation.messages).selectinload(CopilotMessage.proposal)
+
+_REQUIRED_PROPOSAL_KEYS = {
+    "file", "title", "description", "explanation",
+    "startLine", "endLine", "originalCode", "proposedCode", "diffSummary",
+}
 
 
 async def create_conversation(db: AsyncSession, user_id: str, project_id: str | None) -> CopilotConversation:
@@ -54,51 +63,49 @@ async def send_message(
     db.add(user_message)
     await db.flush()
 
-    try:
-        reply = await copilot_reply(db, user_id, convo.projectId, text, provider, model)
-        reply_result = reply["result"] or {}
-        reply_text = str(reply_result.get("answer", "")) or "The model returned an empty answer."
-        used_provider, used_model = reply["provider"], reply["model"]
-    except Exception as exc:  # noqa: BLE001
-        # Keep the conversation usable even if the provider call fails
-        # (missing key, network error, bad JSON, etc.) rather than 500ing
-        # the whole endpoint and losing the user's message.
-        reply_text = f"I couldn't get a response from the AI provider: {exc}"
-        reply_result = {}
-        used_provider, used_model = provider, model
+    reply = await copilot_reply(db, user_id, convo.projectId, text, provider, model)
+    result = reply.get("result") or {}
+    answer_text = str(result.get("answer") or "").strip() or "(No response.)"
+    proposal_payload = result.get("proposal")
 
     ai_message = CopilotMessage(
         conversationId=convo.id,
         sender="ai",
-        text=reply_text,
-        modelUsed=used_model,
-        provider=used_provider,
+        text=answer_text,
+        modelUsed=reply.get("model"),
+        provider=reply.get("provider"),
     )
     db.add(ai_message)
     await db.flush()
 
-    proposal_data = reply_result.get("proposal") if isinstance(reply_result, dict) else None
-    if isinstance(proposal_data, dict):
-        db.add(
-            CodeChangeProposal(
+    if isinstance(proposal_payload, dict) and _REQUIRED_PROPOSAL_KEYS.issubset(proposal_payload.keys()):
+        try:
+            proposal = CodeChangeProposal(
                 conversationId=convo.id,
                 messageId=ai_message.id,
-                file=str(proposal_data.get("file", "")),
-                title=str(proposal_data.get("title", "")),
-                description=str(proposal_data.get("description", "")),
-                explanation=str(proposal_data.get("explanation", "")),
-                startLine=int(proposal_data.get("startLine", 0) or 0),
-                endLine=int(proposal_data.get("endLine", 0) or 0),
-                originalCode=str(proposal_data.get("originalCode", "")),
-                proposedCode=str(proposal_data.get("proposedCode", "")),
-                diffSummary=str(proposal_data.get("diffSummary", "")),
+                file=str(proposal_payload["file"]),
+                title=str(proposal_payload["title"]),
+                description=str(proposal_payload["description"]),
+                explanation=str(proposal_payload["explanation"]),
+                startLine=int(proposal_payload["startLine"]),
+                endLine=int(proposal_payload["endLine"]),
+                originalCode=str(proposal_payload["originalCode"]),
+                proposedCode=str(proposal_payload["proposedCode"]),
+                diffSummary=str(proposal_payload["diffSummary"]),
+                status=ProposalStatus.PENDING_PERMISSION,
             )
-        )
+            db.add(proposal)
+        except (KeyError, ValueError, TypeError):
+            pass  # malformed proposal payload — still keep the plain-text answer
 
     await db.commit()
+    return await _message_with_proposal(db, ai_message.id)
+
+
+async def _message_with_proposal(db: AsyncSession, message_id: str) -> CopilotMessage:
     stmt = (
         select(CopilotMessage)
-        .where(CopilotMessage.id == ai_message.id)
+        .where(CopilotMessage.id == message_id)
         .options(selectinload(CopilotMessage.proposal))
     )
     return (await db.execute(stmt)).scalar_one()

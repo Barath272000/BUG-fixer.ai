@@ -1,4 +1,15 @@
-"""Mirrors: backend/src/modules/ai/context-builder.ts"""
+"""Mirrors: backend/src/modules/ai/context-builder.ts
+
+UPDATED: the original version only read a single file from
+`project.workspacePath` — a plain string column on Project that the
+browser IDE never populates. The IDE's real files live under the
+separate `Workspace` row (Workspace.rootPath), the same one
+app.modules.workspace.service already reads/writes for the file
+explorer and editor. This version additionally pulls a file listing
+and relevant file contents from that real workspace, so the AI can
+actually see what's in the IDE. Nothing from the original payload
+shape was removed — `workspaceFiles` is a new, additive key.
+"""
 import json
 import os
 
@@ -9,13 +20,81 @@ from sqlalchemy.orm import selectinload
 
 from app.common.errors.app_error import AppError
 from app.models.bug import Bug
-from app.models.context import ContextChunk, ContextDocument
+from app.models.context import ContextChunk, ContextDocument, Workspace
 from app.models.project import Project
+from app.modules.workspace.service import read_file as ws_read_file
+from app.modules.workspace.service import tree as ws_tree
+
+_MAX_LISTED_PATHS = 200
+_MAX_FILES_INCLUDED = 5
+_MAX_FILE_CHARS = 4000
+
+
+def _flatten_tree(nodes, out: list[str]) -> None:
+    for node in nodes:
+        if node.type == "file":
+            out.append(node.path)
+        elif node.children:
+            _flatten_tree(node.children, out)
+
+
+async def _gather_live_workspace_context(
+    db: AsyncSession,
+    user_id: str,
+    project_id: str,
+    file_path: str | None,
+    question: str | None,
+    bug_file_path: str | None,
+) -> dict:
+    """Reads the real IDE workspace (Workspace.rootPath) for this project:
+    a file listing, plus the content of any files that are explicitly
+    relevant (an explicit file_path, the bug's recorded filePath, or a
+    file whose name is mentioned in the user's question)."""
+    stmt = select(Workspace).where(Workspace.projectId == project_id)
+    workspace = (await db.execute(stmt)).scalar_one_or_none()
+    if workspace is None:
+        return {"listing": [], "included": []}
+
+    try:
+        nodes = await ws_tree(db, user_id, workspace.id)
+    except AppError:
+        return {"listing": [], "included": []}
+
+    paths: list[str] = []
+    _flatten_tree(nodes, paths)
+    if not paths:
+        return {"listing": [], "included": []}
+
+    wanted: list[str] = []
+    if file_path and file_path in paths:
+        wanted.append(file_path)
+    if bug_file_path and bug_file_path in paths and bug_file_path not in wanted:
+        wanted.append(bug_file_path)
+    if question:
+        lower_question = question.lower()
+        for path in paths:
+            if len(wanted) >= _MAX_FILES_INCLUDED:
+                break
+            if path in wanted:
+                continue
+            if path.lower() in lower_question or path.split("/")[-1].lower() in lower_question:
+                wanted.append(path)
+
+    included = []
+    for path in wanted[:_MAX_FILES_INCLUDED]:
+        try:
+            result = await ws_read_file(db, user_id, workspace.id, path)
+        except AppError:
+            continue
+        included.append({"path": path, "content": result["content"][:_MAX_FILE_CHARS]})
+
+    return {"listing": paths[:_MAX_LISTED_PATHS], "included": included}
 
 
 async def build_ai_context(
     db: AsyncSession,
     project_id: str,
+    user_id: str | None = None,
     bug_id: str | None = None,
     file_path: str | None = None,
     line_number: int | None = None,
@@ -54,6 +133,25 @@ async def build_ai_context(
         except (FileNotFoundError, UnicodeDecodeError, OSError):
             source = ""
 
+    workspace_files = {"listing": [], "included": []}
+    if user_id:
+        workspace_files = await _gather_live_workspace_context(
+            db,
+            user_id,
+            project_id,
+            file_path,
+            question,
+            bug.filePath if bug else None,
+        )
+        # If the plain project.workspacePath lookup above came up empty,
+        # fall back to whatever the live IDE workspace read for the same
+        # file_path — this is the fix for files created in the browser IDE.
+        if not source and file_path:
+            for entry in workspace_files["included"]:
+                if entry["path"] == file_path:
+                    source = entry["content"]
+                    break
+
     context_docs = []
     for doc in project.contextDocuments:
         chunks_sorted = sorted(doc.chunks, key=lambda c: c.ordinal)[:20]
@@ -87,5 +185,6 @@ async def build_ai_context(
         "lineNumber": line_number,
         "source": source,
         "contextDocuments": context_docs,
+        "workspaceFiles": workspace_files,
     }
     return json.dumps(payload, default=str)

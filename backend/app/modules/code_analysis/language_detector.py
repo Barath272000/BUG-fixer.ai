@@ -1,41 +1,30 @@
-"""Mirrors: backend/src/modules/code-analysis/language-detector.ts"""
+"""Detect the primary programming language used by a project workspace."""
 import os
 
-_EXT_LANG = {
-    ".ts": "TypeScript", ".tsx": "TypeScript",
-    ".js": "JavaScript", ".jsx": "JavaScript",
-    ".py": "Python", ".go": "Go", ".rs": "Rust", ".java": "Java",
-    ".sql": "SQL", ".css": "CSS", ".html": "HTML",
+
+_LANGUAGE_BY_EXTENSION = {
+	".js": "JavaScript",
+	".jsx": "JavaScript",
+	".ts": "TypeScript",
+	".tsx": "TypeScript",
+	".py": "Python",
+	".go": "Go",
+	".rs": "Rust",
 }
-_SKIP_DIRS = {"node_modules"}
+_LANGUAGES = ("Python", "TypeScript", "JavaScript", "Go", "Rust")
+_IGNORED_DIRECTORIES = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build"}
 
 
 async def detect_language(root: str) -> str:
-    try:
-        top_level = os.listdir(root)
-    except OSError:
-        return "Unknown"
+	counts = {language: 0 for language in _LANGUAGES}
 
-    if "package.json" in top_level:
-        return "JavaScript"
-    if "pyproject.toml" in top_level or "requirements.txt" in top_level:
-        return "Python"
-    if "go.mod" in top_level:
-        return "Go"
-    if "Cargo.toml" in top_level:
-        return "Rust"
-    if "pom.xml" in top_level or "build.gradle" in top_level:
-        return "Java"
+	for current_root, directories, filenames in os.walk(root):
+		directories[:] = [directory for directory in directories if directory not in _IGNORED_DIRECTORIES]
+		for filename in filenames:
+			language = _LANGUAGE_BY_EXTENSION.get(os.path.splitext(filename)[1].lower())
+			if language:
+				counts[language] += 1
 
-    counts: dict[str, int] = {}
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in _SKIP_DIRS]
-        for name in filenames:
-            ext = os.path.splitext(name)[1].lower()
-            lang = _EXT_LANG.get(ext)
-            if lang:
-                counts[lang] = counts.get(lang, 0) + 1
-
-    if not counts:
-        return "Unknown"
-    return max(counts.items(), key=lambda kv: kv[1])[0]
+	if not any(counts.values()):
+		return "Unknown"
+	return max(counts, key=counts.get)
