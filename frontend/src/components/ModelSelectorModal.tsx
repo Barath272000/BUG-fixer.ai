@@ -1,14 +1,18 @@
 import {
+  AlertTriangle,
   Check,
   CheckCircle2,
   Clock,
   Cpu,
   Info,
   Layers,
+  Loader2,
   X,
   Zap
 } from 'lucide-react';
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import { ApiError } from '../api/client';
+import { fetchSettings, updateSettings } from '../api/settings';
 
 export interface AIModelOption {
   id: string;
@@ -22,9 +26,11 @@ export interface AIModelOption {
   enabled: boolean;
   status: 'available' | 'high-demand' | 'preview';
   benchmarkScore: number;
+  /** Real backend provider/model identifiers this UI entry maps to. */
+  backend: { provider: string; model: string };
 }
 
-const defaultModels: AIModelOption[] = [
+export const defaultModels: AIModelOption[] = [
   {
     id: 'GPT-4-Turbo',
     name: 'GPT-4-Turbo',
@@ -37,6 +43,7 @@ const defaultModels: AIModelOption[] = [
     enabled: true,
     status: 'available',
     benchmarkScore: 92.4,
+    backend: { provider: 'openai', model: 'gpt-4-turbo' },
   },
   {
     id: 'GPT-4o',
@@ -50,6 +57,7 @@ const defaultModels: AIModelOption[] = [
     enabled: true,
     status: 'available',
     benchmarkScore: 95.8,
+    backend: { provider: 'openai', model: 'gpt-4o' },
   },
   {
     id: 'Claude-3-5-Sonnet',
@@ -63,6 +71,7 @@ const defaultModels: AIModelOption[] = [
     enabled: true,
     status: 'available',
     benchmarkScore: 98.2,
+    backend: { provider: 'anthropic', model: 'claude-3-5-sonnet-20241022' },
   },
   {
     id: 'Gemini-1-5-Pro',
@@ -76,6 +85,7 @@ const defaultModels: AIModelOption[] = [
     enabled: true,
     status: 'available',
     benchmarkScore: 94.6,
+    backend: { provider: 'google', model: 'gemini-1.5-pro' },
   },
   {
     id: 'DeepSeek-V3',
@@ -89,21 +99,102 @@ const defaultModels: AIModelOption[] = [
     enabled: true,
     status: 'available',
     benchmarkScore: 96.1,
+    backend: { provider: 'deepseek', model: 'deepseek-chat' },
   },
   {
     id: 'Llama-3-3-70B',
-    name: 'Llama 3.3 70B Instruct',
-    provider: 'Meta AI / Local Sandbox',
-    badge: 'Open Weights',
-    contextWindow: '128k tokens',
-    latency: '1.1s avg',
-    description: 'Fully open-weights model capable of running entirely in secure, air-gapped on-premise Docker sandboxes for maximum data privacy.',
-    strengths: ['Air-Gapped Privacy', 'Zero Data Retention', 'Cost Effective'],
-    enabled: false,
-    status: 'preview',
+    name: 'Llama 3.3 70B Versatile',
+    provider: 'Groq',
+    badge: 'Free Tier',
+    contextWindow: '131k tokens',
+    latency: '0.4s avg',
+    description: 'Open-weights model served on Groq\'s LPU hardware for extremely fast inference. Strong all-around free option — no cost, no card required.',
+    strengths: ['Free & Fast', 'Zero Cost', 'Open Weights'],
+    enabled: true,
+    status: 'available',
     benchmarkScore: 89.9,
+    backend: { provider: 'groq', model: 'llama-3.3-70b-versatile' },
+  },
+  {
+    id: 'Llama-3-1-8B-Instant',
+    name: 'Llama 3.1 8B Instant',
+    provider: 'Groq',
+    badge: 'Free Tier',
+    contextWindow: '131k tokens',
+    latency: '0.2s avg',
+    description: 'Smaller, extremely fast open-weights model on Groq. Best free option for quick, high-volume chat where the 70B model\'s extra reasoning isn\'t needed.',
+    strengths: ['Fastest Response', 'Highest Free Quota', 'Zero Cost'],
+    enabled: true,
+    status: 'available',
+    benchmarkScore: 85.2,
+    backend: { provider: 'groq', model: 'llama-3.1-8b-instant' },
+  },
+  {
+    id: 'Llama-4-Scout',
+    name: 'Llama 4 Scout',
+    provider: 'Groq',
+    badge: 'Free Tier',
+    contextWindow: '131k tokens',
+    latency: '0.5s avg',
+    description: 'Meta\'s newer MoE model on Groq\'s free tier — a solid step up in reasoning quality over Llama 3.x at similar speed.',
+    strengths: ['Newer Architecture', 'Free & Fast', 'Good Reasoning'],
+    enabled: true,
+    status: 'available',
+    benchmarkScore: 91.0,
+    backend: { provider: 'groq', model: 'llama-4-scout-17b-16e-instruct' },
+  },
+  {
+    id: 'Qwen3-32B',
+    name: 'Qwen3 32B',
+    provider: 'Groq',
+    badge: 'Free Tier',
+    contextWindow: '131k tokens',
+    latency: '0.4s avg',
+    description: 'Alibaba\'s Qwen3 served free on Groq. Competitive coding and reasoning performance for a fully free model.',
+    strengths: ['Strong Coding', 'Free & Fast', 'Open Weights'],
+    enabled: true,
+    status: 'available',
+    benchmarkScore: 90.4,
+    backend: { provider: 'groq', model: 'qwen3-32b' },
+  },
+  {
+    id: 'DeepSeek-R1-Distill-70B',
+    name: 'DeepSeek R1 Distill 70B',
+    provider: 'Groq',
+    badge: 'Free Tier',
+    contextWindow: '131k tokens',
+    latency: '0.6s avg',
+    description: 'Distilled reasoning model on Groq\'s free tier — chain-of-thought style reasoning at no cost.',
+    strengths: ['Chain-of-Thought', 'Free & Fast', 'Zero Cost'],
+    enabled: true,
+    status: 'available',
+    benchmarkScore: 92.8,
+    backend: { provider: 'groq', model: 'deepseek-r1-distill-70b' },
+  },
+  {
+    id: 'Kimi-K2',
+    name: 'Kimi K2 Instruct',
+    provider: 'Groq',
+    badge: 'Free Tier',
+    contextWindow: '262k tokens',
+    latency: '0.5s avg',
+    description: 'Moonshot AI\'s Kimi K2 on Groq\'s free tier — the largest free context window available here, useful for bigger files.',
+    strengths: ['Largest Free Context', 'Free & Fast', 'Zero Cost'],
+    enabled: true,
+    status: 'available',
+    benchmarkScore: 90.1,
+    backend: { provider: 'groq', model: 'kimi-k2-instruct' },
   }
 ];
+
+/** Maps a real backend (provider, model) pair back to this UI's model id, for
+ * showing the correct selection when settings were set some other way. */
+export function resolveModelId(provider: string, model: string): string {
+  const match = defaultModels.find(
+    m => m.backend.provider === provider && m.backend.model === model
+  );
+  return match?.id ?? defaultModels[0].id;
+}
 
 interface ModelSelectorModalProps {
   isOpen: boolean;
@@ -121,10 +212,25 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
   const [models, setModels] = useState<AIModelOption[]>(defaultModels);
   const [selectedId, setSelectedId] = useState<string>(currentModel);
   const [filterProvider, setFilterProvider] = useState<string>('ALL');
-
-
-
   const [searchQuery, setSearchQuery] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Sync with the real persisted setting whenever the modal opens.
+  useEffect(() => {
+    if (!isOpen) return;
+    setError(null);
+    (async () => {
+      try {
+        const settings = await fetchSettings();
+        const resolved = resolveModelId(settings.primaryProvider, settings.primaryModel);
+        setSelectedId(resolved);
+      } catch (err) {
+        // Non-fatal — keep whatever was passed in as currentModel.
+        setError(err instanceof ApiError ? err.message : 'Could not load saved model preference.');
+      }
+    })();
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -133,16 +239,32 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
     setModels(prev => prev.map(m => m.id === id ? { ...m, enabled: !m.enabled } : m));
   };
 
-  const handleApplySelection = (modelId: string) => {
+  const handleApplySelection = async (modelId: string) => {
     const target = models.find(m => m.id === modelId);
-    if (target && !target.enabled) {
+    if (!target) return;
+
+    if (!target.enabled) {
       setModels(prev => prev.map(m => m.id === modelId ? { ...m, enabled: true } : m));
     }
-    setSelectedId(modelId);
-    onSelectModel(modelId);
-    setTimeout(() => {
-      onClose();
-    }, 400);
+
+    setSaving(true);
+    setError(null);
+    try {
+      await updateSettings(target.backend.provider, target.backend.model);
+      setSelectedId(modelId);
+      onSelectModel(modelId);
+      setTimeout(() => {
+        onClose();
+      }, 400);
+    } catch (err) {
+      setError(
+        err instanceof ApiError
+          ? err.message
+          : 'Could not save this model as the active engine.'
+      );
+    } finally {
+      setSaving(false);
+    }
   };
 
   const filteredModels = models.filter(m => {
@@ -156,7 +278,7 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
   return (
     <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
       <div className="w-full max-w-3xl bg-[#0D1117] border border-[#30363D] rounded-xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh] animate-in fade-in zoom-in duration-150 text-[#E2E8F0]">
-        
+
         {/* Modal Header */}
         <div className="p-5 border-b border-[#30363D] flex items-center justify-between bg-[#161B22]">
           <div className="flex items-center gap-3">
@@ -176,7 +298,7 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
             </div>
           </div>
 
-          <button 
+          <button
             onClick={onClose}
             className="p-1.5 text-gray-400 hover:text-white hover:bg-[#21262D] rounded-lg transition-colors cursor-pointer"
             title="Close modal"
@@ -188,7 +310,7 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
         {/* Filter Toolbar */}
         <div className="p-4 border-b border-[#30363D] bg-[#0B0E14] flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 text-xs">
           <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0">
-            {['ALL', 'OpenAI', 'Anthropic', 'Google', 'DeepSeek', 'Meta'].map(p => (
+            {['ALL', 'Groq', 'OpenAI', 'Anthropic', 'Google', 'DeepSeek'].map(p => (
               <button
                 key={p}
                 onClick={() => setFilterProvider(p)}
@@ -214,6 +336,13 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
           </div>
         </div>
 
+        {error && (
+          <div className="mx-5 mt-4 flex items-start gap-2 text-xs text-[#F48771] bg-[#4B1113]/30 border border-[#F48771]/40 rounded px-3 py-2">
+            <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+            <span>{error}</span>
+          </div>
+        )}
+
         {/* Model Cards Grid */}
         <div className="flex-1 overflow-y-auto p-5 space-y-3.5 bg-[#0B0E14]">
           {filteredModels.map((model) => {
@@ -222,7 +351,7 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
             return (
               <div
                 key={model.id}
-                onClick={() => handleApplySelection(model.id)}
+                onClick={() => void handleApplySelection(model.id)}
                 className={`group rounded-lg border p-4 transition-all cursor-pointer relative ${
                   isCurrentlySelected
                     ? 'bg-indigo-950/20 border-indigo-500 shadow-md shadow-indigo-950/30'
@@ -230,7 +359,7 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                 }`}
               >
                 <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
-                  
+
                   {/* Left info */}
                   <div className="space-y-2 flex-1">
                     <div className="flex flex-wrap items-center gap-2">
@@ -286,7 +415,7 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
 
                   {/* Right actions */}
                   <div className="flex sm:flex-col items-center sm:items-end justify-between sm:justify-start gap-3 shrink-0 pt-2 sm:pt-0 border-t sm:border-t-0 border-[#21262D]">
-                    
+
                     {/* Availability Switch */}
                     <div className="flex items-center gap-2 text-xs">
                       <span className="text-[11px] text-gray-400">Availability</span>
@@ -305,14 +434,17 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
 
                     {/* Choose button */}
                     <button
-                      onClick={() => handleApplySelection(model.id)}
-                      className={`px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
+                      onClick={() => void handleApplySelection(model.id)}
+                      disabled={saving}
+                      className={`px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50 ${
                         isCurrentlySelected
                           ? 'bg-green-600 text-white shadow-sm'
                           : 'bg-[#21262D] hover:bg-indigo-600 text-gray-200 hover:text-white border border-[#30363D]'
                       }`}
                     >
-                      {isCurrentlySelected ? (
+                      {saving && isCurrentlySelected ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : isCurrentlySelected ? (
                         <>
                           <Check className="w-3.5 h-3.5" />
                           <span>Active</span>
