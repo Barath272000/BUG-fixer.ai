@@ -32,6 +32,7 @@ _ENV_KEY_MAP = {
     "groq": lambda: settings.GROQ_API_KEY,
     "openrouter": lambda: settings.OPENROUTER_API_KEY,
     "deepseek": lambda: settings.DEEPSEEK_API_KEY,
+    "nvidia": lambda: settings.NVIDIA_API_KEY,
 }
 _ENV_URL_MAP = {
     "openai": lambda: settings.OPENAI_BASE_URL,
@@ -40,6 +41,7 @@ _ENV_URL_MAP = {
     "groq": lambda: settings.GROQ_BASE_URL,
     "openrouter": lambda: settings.OPENROUTER_BASE_URL,
     "deepseek": lambda: settings.DEEPSEEK_BASE_URL,
+    "nvidia": lambda: settings.NVIDIA_BASE_URL,
 }
 
 
@@ -50,7 +52,7 @@ def _provider_for(provider: str) -> AIProvider:
         return AnthropicProvider()
     if provider == "google":
         return GoogleProvider()
-    if provider in ("groq", "openrouter", "deepseek"):
+    if provider in ("groq", "openrouter", "deepseek", "nvidia"):
         return OpenAICompatibleProvider(provider)
     raise AppError(400, "UNSUPPORTED_PROVIDER", "The requested AI provider is not supported")
 

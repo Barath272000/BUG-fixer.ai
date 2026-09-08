@@ -27,6 +27,7 @@ _DEFAULT_BASE_URL = {
     Provider.groq: "https://api.groq.com/openai/v1",
     Provider.openrouter: "https://openrouter.ai/api/v1",
     Provider.deepseek: "https://api.deepseek.com/v1",
+    Provider.nvidia: "https://integrate.api.nvidia.com/v1",
 }
 
 # Mirrors modules/ai/service.py's _ENV_KEY_MAP — lets "no user key yet" still
@@ -38,6 +39,7 @@ _ENV_KEY_MAP = {
     Provider.groq: lambda: settings.GROQ_API_KEY,
     Provider.openrouter: lambda: settings.OPENROUTER_API_KEY,
     Provider.deepseek: lambda: settings.DEEPSEEK_API_KEY,
+    Provider.nvidia: lambda: settings.NVIDIA_API_KEY,
 }
 
 # Providers this feature supports (excludes `custom` and `github`, which
@@ -49,6 +51,7 @@ SUPPORTED_PROVIDERS = [
     Provider.anthropic,
     Provider.google,
     Provider.deepseek,
+    Provider.nvidia,
 ]
 
 _CHAT_EXCLUDE_HINTS = (
@@ -175,6 +178,10 @@ async def fetch_models_for_key(provider: Provider, api_key: str, base_url: str |
         raise AppError(400, "MISSING_BASE_URL", "This provider needs a base URL.")
 
     if provider == Provider.groq:
+        return await _fetch_openai_style_models(api_key, resolved_base, force_free=True)
+    if provider == Provider.nvidia:
+        # NVIDIA's API Catalog (build.nvidia.com) keys currently give free,
+        # rate-limited access to the whole hosted model catalog.
         return await _fetch_openai_style_models(api_key, resolved_base, force_free=True)
     if provider == Provider.deepseek:
         return await _fetch_openai_style_models(api_key, resolved_base, force_paid=True)

@@ -88,5 +88,6 @@ class Provider(str, enum.Enum):
     openai = "openai"
     anthropic = "anthropic"
     deepseek = "deepseek"
+    nvidia = "nvidia"
     custom = "custom"
     github = "github"

@@ -48,9 +48,11 @@ class Settings(BaseSettings):
     OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
     DEEPSEEK_API_KEY: str | None = None
     DEEPSEEK_BASE_URL: str = "https://api.deepseek.com/v1"
+    NVIDIA_API_KEY: str | None = None
+    NVIDIA_BASE_URL: str = "https://integrate.api.nvidia.com/v1"
 
     DEFAULT_AI_PROVIDER: Literal[
-        "openai", "anthropic", "google", "groq", "openrouter", "deepseek"
+        "openai", "anthropic", "google", "groq", "openrouter", "deepseek", "nvidia"
     ] = "openai"
     DEFAULT_AI_MODEL: str = "gpt-4o-mini"
 
