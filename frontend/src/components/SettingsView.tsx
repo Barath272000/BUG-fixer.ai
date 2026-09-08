@@ -7,6 +7,7 @@ const MODEL_OPTIONS = [
   { id: 'gpt-4o', provider: 'openai', model: 'gpt-4o', name: 'GPT-4o', providerLabel: 'OpenAI (Omni)', desc: 'Best for multi-file AST context & high complexity' },
   { id: 'claude-3-5', provider: 'anthropic', model: 'claude-3-5-sonnet-20241022', name: 'Claude 3.5 Sonnet', providerLabel: 'Anthropic', desc: 'Superior code syntax precision & refactoring' },
   { id: 'gemini-1-5', provider: 'google', model: 'gemini-1.5-pro', name: 'Gemini 1.5 Pro', providerLabel: 'Google DeepMind', desc: '1M+ token context window for large monorepos' },
+  { id: 'groq-gpt-oss-20b', provider: 'groq', model: 'openai/gpt-oss-20b', name: 'GPT OSS 20B', providerLabel: 'Groq', desc: 'Fast hosted open-weight model for coding assistance' },
 ] as const;
 
 interface UserSetting {
@@ -15,11 +16,6 @@ interface UserSetting {
   autoRunTests: boolean;
   minimumConfidence: number;
   sandboxGuardrails: boolean;
-}
-
-interface SettingsResponse {
-  settings: UserSetting;
-  credentials: { provider: string; baseUrl: string | null; createdAt: string }[];
 }
 
 function modelIdFor(provider: string, model: string): string {
@@ -42,12 +38,12 @@ export const SettingsView: React.FC = () => {
     let cancelled = false;
     (async () => {
       try {
-        const data = await apiRequest<SettingsResponse>('/settings');
+        const data = await apiRequest<UserSetting>('/settings/me');
         if (cancelled) return;
-        setSelectedModel(modelIdFor(data.settings.primaryProvider, data.settings.primaryModel));
-        setAutoRunTests(data.settings.autoRunTests);
-        setMinConfidence(data.settings.minimumConfidence);
-        setSandboxGuardrails(data.settings.sandboxGuardrails);
+        setSelectedModel(modelIdFor(data.primaryProvider, data.primaryModel));
+        setAutoRunTests(data.autoRunTests);
+        setMinConfidence(data.minimumConfidence);
+        setSandboxGuardrails(data.sandboxGuardrails);
       } catch (err) {
         if (!cancelled) setError(err instanceof ApiError ? err.message : 'Failed to load settings');
       } finally {
@@ -62,8 +58,8 @@ export const SettingsView: React.FC = () => {
     setSaving(true);
     setError(null);
     try {
-      await apiRequest('/settings', {
-        method: 'PATCH',
+      await apiRequest('/settings/me', {
+        method: 'PUT',
         body: {
           primaryProvider: chosen.provider,
           primaryModel: chosen.model,
