@@ -63,17 +63,31 @@ async def send_message(
     db.add(user_message)
     await db.flush()
 
-    reply = await copilot_reply(db, user_id, convo.projectId, text, provider, model)
-    result = reply.get("result") or {}
-    answer_text = str(result.get("answer") or "").strip() or "(No response.)"
-    proposal_payload = result.get("proposal")
+    # A provider failure (no key configured yet, network error, bad JSON reply, etc.) should
+    # never crash the whole request — that would lose the user's message and, worse, is exactly
+    # what a brand-new user (before they've added any API key) would hit on their very first
+    # message. Save it as a normal AI message explaining what happened instead.
+    try:
+        reply = await copilot_reply(db, user_id, convo.projectId, text, provider, model)
+        result = reply.get("result") or {}
+        answer_text = str(result.get("answer") or "").strip() or "(No response.)"
+        proposal_payload = result.get("proposal")
+        used_provider, used_model = reply.get("provider"), reply.get("model")
+    except AppError as exc:
+        answer_text = f"I couldn't get a response from the AI provider: {exc.message}"
+        proposal_payload = None
+        used_provider, used_model = provider, model
+    except Exception as exc:  # noqa: BLE001 — any other provider/network failure degrades the same way
+        answer_text = f"I couldn't get a response from the AI provider: {exc}"
+        proposal_payload = None
+        used_provider, used_model = provider, model
 
     ai_message = CopilotMessage(
         conversationId=convo.id,
         sender="ai",
         text=answer_text,
-        modelUsed=reply.get("model"),
-        provider=reply.get("provider"),
+        modelUsed=used_model,
+        provider=used_provider,
     )
     db.add(ai_message)
     await db.flush()

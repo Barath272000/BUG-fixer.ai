@@ -12,13 +12,21 @@ from app.common.errors.app_error import AppError
 from app.models.enums import Provider
 from app.models.settings import UserSetting
 
+# Free-tier default for brand-new users: no card, no signup friction, works the
+# moment a GROQ_API_KEY is dropped into the server .env. New users default here
+# unconditionally — even before a key is added — because if nothing at all is
+# configured yet, the failure a user should be pointed at is "add a free Groq
+# key" rather than "add a paid OpenAI key" (settings.DEFAULT_AI_PROVIDER).
+_FREE_DEFAULT_PROVIDER = Provider.groq
+_FREE_DEFAULT_MODEL = "llama-3.3-70b-versatile"
+
 
 async def get_or_create_settings(db: AsyncSession, user_id: str) -> UserSetting:
     stmt = select(UserSetting).where(UserSetting.userId == user_id)
     row = (await db.execute(stmt)).scalar_one_or_none()
     if row is not None:
         return row
-    row = UserSetting(userId=user_id)
+    row = UserSetting(userId=user_id, primaryProvider=_FREE_DEFAULT_PROVIDER, primaryModel=_FREE_DEFAULT_MODEL)
     db.add(row)
     await db.commit()
     await db.refresh(row)

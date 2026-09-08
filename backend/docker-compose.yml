@@ -25,6 +25,7 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql+asyncpg://bugfixai:bugfixai@postgres:5432/bugfixai
+      REDIS_URL: redis://redis:6379
     depends_on:
       - postgres
       - redis
@@ -40,6 +41,8 @@ services:
       dockerfile: Dockerfile.worker
     env_file:
       - .env
+    environment:
+      REDIS_URL: redis://redis:6379
     depends_on:
       - postgres
       - redis
