@@ -5,13 +5,25 @@ import {
   Clock,
   Cpu,
   Info,
+  KeyRound,
   Layers,
   Loader2,
+  Lock,
+  Sparkles,
+  Trash2,
   X,
   Zap
 } from 'lucide-react';
 import React, { useEffect, useState } from 'react';
 import { ApiError } from '../api/client';
+import {
+  CredentialStatus,
+  ModelInfo as LiveModelInfo,
+  deleteCredential,
+  fetchCredentialStatus,
+  fetchProviderModels,
+  saveCredential
+} from '../api/credentials';
 import { fetchSettings, updateSettings } from '../api/settings';
 
 export interface AIModelOption {
@@ -210,6 +222,17 @@ export function resolveModelId(provider: string, model: string): string {
   return match?.id ?? defaultModels[0].id;
 }
 
+// Provider tabs that hit the live "bring your own key" flow. 'ALL' stays a
+// curated static overview and isn't part of this list.
+const LIVE_PROVIDER_TABS: { label: string; id: string }[] = [
+  { label: 'Groq', id: 'groq' },
+  { label: 'OpenAI', id: 'openai' },
+  { label: 'Anthropic', id: 'anthropic' },
+  { label: 'Google', id: 'google' },
+  { label: 'DeepSeek', id: 'deepseek' },
+  { label: 'OpenRouter', id: 'openrouter' },
+];
+
 interface ModelSelectorModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -225,26 +248,79 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
 }) => {
   const [models, setModels] = useState<AIModelOption[]>(defaultModels);
   const [selectedId, setSelectedId] = useState<string>(currentModel);
+  const [activeBackend, setActiveBackend] = useState<{ provider: string; model: string } | null>(null);
   const [filterProvider, setFilterProvider] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Live "bring your own key" state, keyed by provider id.
+  const [credentialStatus, setCredentialStatus] = useState<Record<string, CredentialStatus>>({});
+  const [liveModels, setLiveModels] = useState<Record<string, LiveModelInfo[]>>({});
+  const [loadingProvider, setLoadingProvider] = useState<string | null>(null);
+  const [keyInput, setKeyInput] = useState('');
+  const [connecting, setConnecting] = useState(false);
+  const [keyError, setKeyError] = useState<string | null>(null);
+
   // Sync with the real persisted setting whenever the modal opens.
   useEffect(() => {
     if (!isOpen) return;
     setError(null);
+    setFilterProvider('ALL');
+    setKeyInput('');
+    setKeyError(null);
     (async () => {
       try {
         const settings = await fetchSettings();
         const resolved = resolveModelId(settings.primaryProvider, settings.primaryModel);
         setSelectedId(resolved);
+        setActiveBackend({ provider: settings.primaryProvider, model: settings.primaryModel });
       } catch (err) {
         // Non-fatal — keep whatever was passed in as currentModel.
         setError(err instanceof ApiError ? err.message : 'Could not load saved model preference.');
       }
+      try {
+        const statuses = await fetchCredentialStatus();
+        const byProvider: Record<string, CredentialStatus> = {};
+        statuses.forEach(s => { byProvider[s.provider] = s; });
+        setCredentialStatus(byProvider);
+      } catch {
+        // Non-fatal — provider tabs will just show the key form on demand.
+      }
     })();
   }, [isOpen]);
+
+  const loadProviderModels = async (providerId: string) => {
+    setLoadingProvider(providerId);
+    setKeyError(null);
+    try {
+      const res = await fetchProviderModels(providerId);
+      setCredentialStatus(prev => ({
+        ...prev,
+        [providerId]: {
+          provider: providerId,
+          hasKey: prev[providerId]?.hasKey ?? false,
+          envFallback: res.configured && !(prev[providerId]?.hasKey),
+          baseUrl: prev[providerId]?.baseUrl ?? null,
+        },
+      }));
+      if (res.configured) {
+        setLiveModels(prev => ({ ...prev, [providerId]: res.models }));
+      }
+    } catch (err) {
+      setKeyError(err instanceof ApiError ? err.message : 'Could not load models for this provider.');
+    } finally {
+      setLoadingProvider(null);
+    }
+  };
+
+  useEffect(() => {
+    if (!isOpen || filterProvider === 'ALL') return;
+    const providerId = LIVE_PROVIDER_TABS.find(t => t.label === filterProvider)?.id;
+    if (!providerId || liveModels[providerId]) return;
+    void loadProviderModels(providerId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterProvider, isOpen]);
 
   if (!isOpen) return null;
 
@@ -266,10 +342,9 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
     try {
       await updateSettings(target.backend.provider, target.backend.model);
       setSelectedId(modelId);
+      setActiveBackend(target.backend);
       onSelectModel(modelId);
-      setTimeout(() => {
-        onClose();
-      }, 400);
+      setTimeout(() => onClose(), 400);
     } catch (err) {
       setError(
         err instanceof ApiError
@@ -281,6 +356,59 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
     }
   };
 
+  const handleSelectLiveModel = async (providerId: string, model: LiveModelInfo) => {
+    setSaving(true);
+    setError(null);
+    try {
+      await updateSettings(providerId, model.id);
+      setSelectedId('');
+      setActiveBackend({ provider: providerId, model: model.id });
+      onSelectModel(model.name);
+      setTimeout(() => onClose(), 400);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Could not save this model as the active engine.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleConnect = async (providerId: string) => {
+    if (!keyInput.trim()) return;
+    setConnecting(true);
+    setKeyError(null);
+    try {
+      const res = await saveCredential(providerId, keyInput.trim());
+      setCredentialStatus(prev => ({
+        ...prev,
+        [providerId]: { provider: providerId, hasKey: true, envFallback: false, baseUrl: null },
+      }));
+      setLiveModels(prev => ({ ...prev, [providerId]: res.models }));
+      setKeyInput('');
+    } catch (err) {
+      setKeyError(err instanceof ApiError ? err.message : 'Could not validate this API key.');
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  const handleDisconnect = async (providerId: string) => {
+    setConnecting(true);
+    setKeyError(null);
+    try {
+      await deleteCredential(providerId);
+      setCredentialStatus(prev => ({ ...prev, [providerId]: { provider: providerId, hasKey: false, envFallback: false, baseUrl: null } }));
+      setLiveModels(prev => {
+        const next = { ...prev };
+        delete next[providerId];
+        return next;
+      });
+    } catch (err) {
+      setKeyError(err instanceof ApiError ? err.message : 'Could not remove this key.');
+    } finally {
+      setConnecting(false);
+    }
+  };
+
   const filteredModels = models.filter(m => {
     const matchesSearch = m.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
                           m.provider.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -288,6 +416,18 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
     const matchesProvider = filterProvider === 'ALL' || m.provider.toLowerCase().includes(filterProvider.toLowerCase());
     return matchesSearch && matchesProvider;
   });
+
+  const activeProviderTab = LIVE_PROVIDER_TABS.find(t => t.label === filterProvider);
+  const activeProviderId = activeProviderTab?.id ?? null;
+  const activeStatus = activeProviderId ? credentialStatus[activeProviderId] : undefined;
+  const activeModels = activeProviderId ? (liveModels[activeProviderId] ?? []) : [];
+  const freeModels = activeModels.filter(m => m.free).filter(m =>
+    m.name.toLowerCase().includes(searchQuery.toLowerCase()) || m.id.toLowerCase().includes(searchQuery.toLowerCase())
+  );
+  const paidModels = activeModels.filter(m => !m.free).filter(m =>
+    m.name.toLowerCase().includes(searchQuery.toLowerCase()) || m.id.toLowerCase().includes(searchQuery.toLowerCase())
+  );
+  const isConfigured = !!activeStatus && (activeStatus.hasKey || activeStatus.envFallback);
 
   return (
     <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
@@ -324,7 +464,7 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
         {/* Filter Toolbar */}
         <div className="p-4 border-b border-[#30363D] bg-[#0B0E14] flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 text-xs">
           <div className="flex items-center gap-1.5 overflow-x-auto pb-1 sm:pb-0">
-            {['ALL', 'Groq', 'OpenAI', 'Anthropic', 'Google', 'DeepSeek'].map(p => (
+            {['ALL', ...LIVE_PROVIDER_TABS.map(t => t.label)].map(p => (
               <button
                 key={p}
                 onClick={() => setFilterProvider(p)}
@@ -357,123 +497,235 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
           </div>
         )}
 
-        {/* Model Cards Grid */}
+        {/* Body */}
         <div className="flex-1 overflow-y-auto p-5 space-y-3.5 bg-[#0B0E14]">
-          {filteredModels.map((model) => {
-            const isCurrentlySelected = selectedId === model.id;
+          {filterProvider === 'ALL' ? (
+            filteredModels.map((model) => {
+              const isCurrentlySelected = selectedId === model.id;
 
-            return (
-              <div
-                key={model.id}
-                onClick={() => void handleApplySelection(model.id)}
-                className={`group rounded-lg border p-4 transition-all cursor-pointer relative ${
-                  isCurrentlySelected
-                    ? 'bg-indigo-950/20 border-indigo-500 shadow-md shadow-indigo-950/30'
-                    : 'bg-[#0D1117] border-[#30363D] hover:border-gray-500 hover:bg-[#161B22]'
-                }`}
-              >
-                <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+              return (
+                <div
+                  key={model.id}
+                  onClick={() => void handleApplySelection(model.id)}
+                  className={`group rounded-lg border p-4 transition-all cursor-pointer relative ${
+                    isCurrentlySelected
+                      ? 'bg-indigo-950/20 border-indigo-500 shadow-md shadow-indigo-950/30'
+                      : 'bg-[#0D1117] border-[#30363D] hover:border-gray-500 hover:bg-[#161B22]'
+                  }`}
+                >
+                  <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
 
-                  {/* Left info */}
-                  <div className="space-y-2 flex-1">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <div className="flex items-center gap-1.5">
-                        <span className={`w-2.5 h-2.5 rounded-full ${model.enabled ? 'bg-green-500 shadow-xs shadow-green-500/50' : 'bg-gray-600'}`} />
-                        <h3 className="text-sm font-bold text-white font-mono">{model.name}</h3>
+                    {/* Left info */}
+                    <div className="space-y-2 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="flex items-center gap-1.5">
+                          <span className={`w-2.5 h-2.5 rounded-full ${model.enabled ? 'bg-green-500 shadow-xs shadow-green-500/50' : 'bg-gray-600'}`} />
+                          <h3 className="text-sm font-bold text-white font-mono">{model.name}</h3>
+                        </div>
+
+                        <span className="text-[11px] text-gray-400 font-mono">by {model.provider}</span>
+
+                        {model.badge && (
+                          <span className="px-2 py-0.2 rounded text-[10px] font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/40">
+                            {model.badge}
+                          </span>
+                        )}
+
+                        {isCurrentlySelected && (
+                          <span className="px-2 py-0.2 rounded text-[10px] font-bold bg-green-500/20 text-green-300 border border-green-500/40 flex items-center gap-1">
+                            <CheckCircle2 className="w-3 h-3" />
+                            ACTIVE ENGINE
+                          </span>
+                        )}
                       </div>
 
-                      <span className="text-[11px] text-gray-400 font-mono">by {model.provider}</span>
+                      <p className="text-xs text-gray-300 leading-relaxed pr-2">
+                        {model.description}
+                      </p>
 
-                      {model.badge && (
-                        <span className="px-2 py-0.2 rounded text-[10px] font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/40">
-                          {model.badge}
+                      {/* Metadata tags */}
+                      <div className="flex flex-wrap items-center gap-2 pt-1">
+                        <span className="px-2 py-0.5 rounded bg-[#161B22] border border-[#30363D] text-[11px] text-gray-400 flex items-center gap-1">
+                          <Layers className="w-3 h-3 text-indigo-400" />
+                          {model.contextWindow}
                         </span>
-                      )}
 
-                      {isCurrentlySelected && (
-                        <span className="px-2 py-0.2 rounded text-[10px] font-bold bg-green-500/20 text-green-300 border border-green-500/40 flex items-center gap-1">
-                          <CheckCircle2 className="w-3 h-3" />
-                          ACTIVE ENGINE
+                        <span className="px-2 py-0.5 rounded bg-[#161B22] border border-[#30363D] text-[11px] text-gray-400 flex items-center gap-1">
+                          <Clock className="w-3 h-3 text-amber-400" />
+                          {model.latency}
                         </span>
-                      )}
+
+                        <span className="px-2 py-0.5 rounded bg-[#161B22] border border-[#30363D] text-[11px] text-gray-400 flex items-center gap-1">
+                          <Zap className="w-3 h-3 text-green-400" />
+                          {model.benchmarkScore}% CodeEval
+                        </span>
+
+                        {model.strengths.map((str, i) => (
+                          <span key={i} className="px-2 py-0.5 rounded bg-[#161B22] text-gray-400 text-[10px]">
+                            • {str}
+                          </span>
+                        ))}
+                      </div>
                     </div>
 
-                    <p className="text-xs text-gray-300 leading-relaxed pr-2">
-                      {model.description}
+                    {/* Right actions */}
+                    <div className="flex sm:flex-col items-center sm:items-end justify-between sm:justify-start gap-3 shrink-0 pt-2 sm:pt-0 border-t sm:border-t-0 border-[#21262D]">
+
+                      {/* Availability Switch */}
+                      <div className="flex items-center gap-2 text-xs">
+                        <span className="text-[11px] text-gray-400">Availability</span>
+                        <button
+                          onClick={(e) => toggleModelAvailability(model.id, e)}
+                          className={`w-9 h-5 rounded-full p-0.5 transition-colors cursor-pointer ${
+                            model.enabled ? 'bg-indigo-600' : 'bg-gray-700'
+                          }`}
+                          title={model.enabled ? "Disable model" : "Enable model"}
+                        >
+                          <div className={`w-4 h-4 rounded-full bg-white transition-transform ${
+                            model.enabled ? 'translate-x-4' : 'translate-x-0'
+                          }`} />
+                        </button>
+                      </div>
+
+                      {/* Choose button */}
+                      <button
+                        onClick={() => void handleApplySelection(model.id)}
+                        disabled={saving}
+                        className={`px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50 ${
+                          isCurrentlySelected
+                            ? 'bg-green-600 text-white shadow-sm'
+                            : 'bg-[#21262D] hover:bg-indigo-600 text-gray-200 hover:text-white border border-[#30363D]'
+                        }`}
+                      >
+                        {saving && isCurrentlySelected ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : isCurrentlySelected ? (
+                          <>
+                            <Check className="w-3.5 h-3.5" />
+                            <span>Active</span>
+                          </>
+                        ) : (
+                          <span>Select Model</span>
+                        )}
+                      </button>
+
+                    </div>
+
+                  </div>
+                </div>
+              );
+            })
+          ) : (
+            <>
+              {keyError && (
+                <div className="flex items-start gap-2 text-xs text-[#F48771] bg-[#4B1113]/30 border border-[#F48771]/40 rounded px-3 py-2">
+                  <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span>{keyError}</span>
+                </div>
+              )}
+
+              {loadingProvider === activeProviderId && (
+                <div className="flex items-center justify-center gap-2 text-sm text-gray-400 py-10">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  Checking your {filterProvider} account...
+                </div>
+              )}
+
+              {loadingProvider !== activeProviderId && !isConfigured && activeProviderId && (
+                <div className="rounded-lg border border-[#30363D] bg-[#0D1117] p-6 max-w-lg mx-auto text-center space-y-4">
+                  <div className="w-10 h-10 rounded-lg bg-indigo-600/20 border border-indigo-500/40 flex items-center justify-center mx-auto">
+                    <KeyRound className="w-5 h-5 text-indigo-300" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-white">Connect your {filterProvider} account</h3>
+                    <p className="text-xs text-gray-400 mt-1">
+                      Enter an API key and we'll validate it directly against {filterProvider}, then list every free and paid model your key can access.
                     </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="password"
+                      autoComplete="off"
+                      placeholder={`${filterProvider} API key`}
+                      value={keyInput}
+                      onChange={(e) => setKeyInput(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') void handleConnect(activeProviderId); }}
+                      className="flex-1 px-3 py-2 bg-[#161B22] border border-[#30363D] rounded-md text-xs text-gray-200 placeholder-gray-500 focus:outline-none focus:border-indigo-500"
+                    />
+                    <button
+                      onClick={() => void handleConnect(activeProviderId)}
+                      disabled={connecting || !keyInput.trim()}
+                      className="px-3 py-2 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+                    >
+                      {connecting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Lock className="w-3.5 h-3.5" />}
+                      Connect
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-gray-500">Your key is encrypted at rest and only used server-side to call {filterProvider}.</p>
+                </div>
+              )}
 
-                    {/* Metadata tags */}
-                    <div className="flex flex-wrap items-center gap-2 pt-1">
-                      <span className="px-2 py-0.5 rounded bg-[#161B22] border border-[#30363D] text-[11px] text-gray-400 flex items-center gap-1">
-                        <Layers className="w-3 h-3 text-indigo-400" />
-                        {model.contextWindow}
-                      </span>
+              {loadingProvider !== activeProviderId && isConfigured && activeProviderId && (
+                <>
+                  <div className="flex items-center justify-between text-[11px] text-gray-400 px-1">
+                    <span className="flex items-center gap-1.5">
+                      <CheckCircle2 className="w-3.5 h-3.5 text-green-400" />
+                      {activeStatus?.hasKey ? 'Connected with your API key' : 'Using the server default key'}
+                    </span>
+                    {activeStatus?.hasKey && (
+                      <button
+                        onClick={() => void handleDisconnect(activeProviderId)}
+                        disabled={connecting}
+                        className="flex items-center gap-1 text-gray-400 hover:text-[#F48771] cursor-pointer disabled:opacity-50"
+                      >
+                        <Trash2 className="w-3 h-3" /> Remove key
+                      </button>
+                    )}
+                  </div>
 
-                      <span className="px-2 py-0.5 rounded bg-[#161B22] border border-[#30363D] text-[11px] text-gray-400 flex items-center gap-1">
-                        <Clock className="w-3 h-3 text-amber-400" />
-                        {model.latency}
-                      </span>
-
-                      <span className="px-2 py-0.5 rounded bg-[#161B22] border border-[#30363D] text-[11px] text-gray-400 flex items-center gap-1">
-                        <Zap className="w-3 h-3 text-green-400" />
-                        {model.benchmarkScore}% CodeEval
-                      </span>
-
-                      {model.strengths.map((str, i) => (
-                        <span key={i} className="px-2 py-0.5 rounded bg-[#161B22] text-gray-400 text-[10px]">
-                          • {str}
-                        </span>
+                  {freeModels.length > 0 && (
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-1.5 text-[11px] font-bold text-green-400 uppercase tracking-wide px-1">
+                        <Sparkles className="w-3.5 h-3.5" /> Free Models
+                      </div>
+                      {freeModels.map(model => (
+                        <LiveModelCard
+                          key={model.id}
+                          model={model}
+                          isActive={activeBackend?.provider === activeProviderId && activeBackend?.model === model.id}
+                          saving={saving}
+                          onSelect={() => void handleSelectLiveModel(activeProviderId, model)}
+                        />
                       ))}
                     </div>
-                  </div>
+                  )}
 
-                  {/* Right actions */}
-                  <div className="flex sm:flex-col items-center sm:items-end justify-between sm:justify-start gap-3 shrink-0 pt-2 sm:pt-0 border-t sm:border-t-0 border-[#21262D]">
-
-                    {/* Availability Switch */}
-                    <div className="flex items-center gap-2 text-xs">
-                      <span className="text-[11px] text-gray-400">Availability</span>
-                      <button
-                        onClick={(e) => toggleModelAvailability(model.id, e)}
-                        className={`w-9 h-5 rounded-full p-0.5 transition-colors cursor-pointer ${
-                          model.enabled ? 'bg-indigo-600' : 'bg-gray-700'
-                        }`}
-                        title={model.enabled ? "Disable model" : "Enable model"}
-                      >
-                        <div className={`w-4 h-4 rounded-full bg-white transition-transform ${
-                          model.enabled ? 'translate-x-4' : 'translate-x-0'
-                        }`} />
-                      </button>
+                  {paidModels.length > 0 && (
+                    <div className="space-y-2 pt-2">
+                      <div className="flex items-center gap-1.5 text-[11px] font-bold text-amber-400 uppercase tracking-wide px-1">
+                        <Lock className="w-3.5 h-3.5" /> Paid Models
+                      </div>
+                      {paidModels.map(model => (
+                        <LiveModelCard
+                          key={model.id}
+                          model={model}
+                          isActive={activeBackend?.provider === activeProviderId && activeBackend?.model === model.id}
+                          saving={saving}
+                          onSelect={() => void handleSelectLiveModel(activeProviderId, model)}
+                        />
+                      ))}
                     </div>
+                  )}
 
-                    {/* Choose button */}
-                    <button
-                      onClick={() => void handleApplySelection(model.id)}
-                      disabled={saving}
-                      className={`px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50 ${
-                        isCurrentlySelected
-                          ? 'bg-green-600 text-white shadow-sm'
-                          : 'bg-[#21262D] hover:bg-indigo-600 text-gray-200 hover:text-white border border-[#30363D]'
-                      }`}
-                    >
-                      {saving && isCurrentlySelected ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      ) : isCurrentlySelected ? (
-                        <>
-                          <Check className="w-3.5 h-3.5" />
-                          <span>Active</span>
-                        </>
-                      ) : (
-                        <span>Select Model</span>
-                      )}
-                    </button>
-
-                  </div>
-
-                </div>
-              </div>
-            );
-          })}
+                  {freeModels.length === 0 && paidModels.length === 0 && (
+                    <div className="text-center text-xs text-gray-500 py-10">
+                      No models matched your search for {filterProvider}.
+                    </div>
+                  )}
+                </>
+              )}
+            </>
+          )}
         </div>
 
         {/* Modal Footer */}
@@ -495,3 +747,54 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
     </div>
   );
 };
+
+const LiveModelCard: React.FC<{
+  model: LiveModelInfo;
+  isActive: boolean;
+  saving: boolean;
+  onSelect: () => void;
+}> = ({ model, isActive, saving, onSelect }) => (
+  <div
+    onClick={onSelect}
+    className={`group rounded-lg border p-3.5 transition-all cursor-pointer flex items-center justify-between gap-3 ${
+      isActive
+        ? 'bg-indigo-950/20 border-indigo-500 shadow-md shadow-indigo-950/30'
+        : 'bg-[#0D1117] border-[#30363D] hover:border-gray-500 hover:bg-[#161B22]'
+    }`}
+  >
+    <div className="flex items-center gap-2 min-w-0">
+      <span className={`w-2 h-2 rounded-full shrink-0 ${model.free ? 'bg-green-500' : 'bg-amber-500'}`} />
+      <div className="min-w-0">
+        <div className="flex items-center gap-2">
+          <h4 className="text-xs font-bold text-white font-mono truncate">{model.name}</h4>
+          {isActive && (
+            <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-green-500/20 text-green-300 border border-green-500/40 shrink-0">
+              ACTIVE
+            </span>
+          )}
+        </div>
+        {model.pricing && <p className="text-[10px] text-gray-500 mt-0.5">{model.pricing}</p>}
+      </div>
+    </div>
+
+    <button
+      onClick={(e) => { e.stopPropagation(); onSelect(); }}
+      disabled={saving}
+      className={`px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50 shrink-0 ${
+        isActive
+          ? 'bg-green-600 text-white'
+          : 'bg-[#21262D] hover:bg-indigo-600 text-gray-200 hover:text-white border border-[#30363D]'
+      }`}
+    >
+      {saving && isActive ? (
+        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+      ) : isActive ? (
+        <>
+          <Check className="w-3.5 h-3.5" /> <span>Active</span>
+        </>
+      ) : (
+        <span>Select</span>
+      )}
+    </button>
+  </div>
+);

@@ -65,16 +65,21 @@ async def _credentials(db: AsyncSession, user_id: str, provider: str) -> dict:
         ProviderCredential.userId == user_id, ProviderCredential.provider == provider_enum
     )
     record = (await db.execute(stmt)).scalar_one_or_none()
+    url_fn = _ENV_URL_MAP.get(provider)
     if record:
-        return {"key": decrypt_secret(record.encryptedKey), "base_url": record.baseUrl}
+        # A saved credential may not have a custom base URL (the "bring your
+        # own key" flow doesn't ask for one) — fall back to the provider's
+        # default base URL rather than passing None into the HTTP request.
+        return {
+            "key": decrypt_secret(record.encryptedKey),
+            "base_url": record.baseUrl or (url_fn() if url_fn else None),
+        }
 
     key_fn = _ENV_KEY_MAP.get(provider)
-    url_fn = _ENV_URL_MAP.get(provider)
     return {
         "key": key_fn() if key_fn else None,
         "base_url": url_fn() if url_fn else None,
     }
-
 
 def _parse_json(text: str) -> dict:
     clean = text.strip()
