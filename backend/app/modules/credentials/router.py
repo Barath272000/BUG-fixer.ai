@@ -7,12 +7,15 @@ from app.db.session import get_db
 from app.modules.credentials.schemas import (
     CredentialStatus,
     ModelsResponse,
+    ProviderUsageOut,
     SaveCredentialRequest,
     SaveCredentialResponse,
 )
 from app.modules.credentials.service import (
     delete_credential,
     get_models_for_user_provider,
+    get_usage_for_all_providers,
+    get_usage_for_provider,
     list_credential_status,
     validate_and_save_credential,
 )
@@ -58,3 +61,20 @@ async def get_provider_models(
 ):
     configured, models = await get_models_for_user_provider(db, current_user.id, provider)
     return ModelsResponse(provider=provider, configured=configured, models=models)
+
+
+@router.get("/usage/all", response_model=list[ProviderUsageOut])
+async def get_all_provider_usage(
+    current_user: AuthUser = Depends(require_auth),
+):
+    """Powers the top-bar quota badge - one call covers every provider so the
+    IDE shell doesn't need a request per provider just to render a dot."""
+    return await get_usage_for_all_providers(current_user.id)
+
+
+@router.get("/{provider}/usage", response_model=ProviderUsageOut)
+async def get_provider_usage(
+    provider: str,
+    current_user: AuthUser = Depends(require_auth),
+):
+    return await get_usage_for_provider(current_user.id, provider)

@@ -55,7 +55,13 @@ async def _conversation_for(db: AsyncSession, user_id: str, conversation_id: str
 
 
 async def send_message(
-    db: AsyncSession, user_id: str, conversation_id: str, text: str, provider: str | None, model: str | None
+    db: AsyncSession,
+    user_id: str,
+    conversation_id: str,
+    text: str,
+    provider: str | None,
+    model: str | None,
+    file_path: str | None = None,
 ) -> CopilotMessage:
     convo = await _conversation_for(db, user_id, conversation_id)
 
@@ -68,7 +74,7 @@ async def send_message(
     # what a brand-new user (before they've added any API key) would hit on their very first
     # message. Save it as a normal AI message explaining what happened instead.
     try:
-        reply = await copilot_reply(db, user_id, convo.projectId, text, provider, model)
+        reply = await copilot_reply(db, user_id, convo.projectId, text, provider, model, file_path=file_path)
         result = reply.get("result") or {}
         answer_text = str(result.get("answer") or "").strip() or "(No response.)"
         proposal_payload = result.get("proposal")

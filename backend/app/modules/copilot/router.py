@@ -45,7 +45,7 @@ async def post_message(
     db: AsyncSession = Depends(get_db),
 ):
     message = await send_message(
-        db, current_user.id, conversation_id, payload.text, payload.provider, payload.model
+        db, current_user.id, conversation_id, payload.text, payload.provider, payload.model, file_path=payload.filePath
     )
     return MessageOut.model_validate(message)
 

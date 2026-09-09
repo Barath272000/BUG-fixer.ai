@@ -47,11 +47,12 @@ export async function sendCopilotMessage(
   conversationId: string,
   text: string,
   provider?: string,
-  model?: string
+  model?: string,
+  filePath?: string
 ): Promise<CopilotMessage> {
   return apiRequest<CopilotMessage>(`/copilot/conversations/${conversationId}/messages`, {
     method: 'POST',
-    body: { text, provider, model },
+    body: { text, provider, model, filePath },
   });
 }
 

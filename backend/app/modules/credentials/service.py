@@ -18,7 +18,8 @@ from app.core.config import settings
 from app.core.secret_crypto import decrypt_secret, encrypt_secret
 from app.models.enums import Provider
 from app.models.settings import ProviderCredential
-from app.modules.credentials.schemas import CredentialStatus, ModelInfo
+from app.modules.credentials.schemas import CredentialStatus, ModelInfo, ModelUsageOut, ProviderUsageOut
+from app.modules.ai.usage_tracking import ModelUsage, get_key_usage
 
 _DEFAULT_BASE_URL = {
     Provider.openai: "https://api.openai.com/v1",
@@ -85,7 +86,15 @@ async def _fetch_openai_style_models(
         model_id = entry.get("id")
         if not model_id or not _looks_like_chat_model(model_id):
             continue
-        models.append(ModelInfo(id=model_id, name=model_id, free=force_free and not force_paid))
+        # Groq's /models response includes this; most other OpenAI-compatible
+        # endpoints (OpenAI, DeepSeek, NVIDIA) don't, so this is None there.
+        context_window = entry.get("context_window")
+        models.append(ModelInfo(
+            id=model_id,
+            name=model_id,
+            free=force_free and not force_paid,
+            contextWindow=int(context_window) if isinstance(context_window, (int, float)) else None,
+        ))
     models.sort(key=lambda m: m.id)
     return models
 
@@ -121,11 +130,13 @@ async def _fetch_openrouter_models(api_key: str, base_url: str) -> list[ModelInf
                 f"${prompt_price * 1_000_000:.2f} / 1M in - "
                 f"${completion_price * 1_000_000:.2f} / 1M out"
             )
+        context_length = entry.get("context_length")
         models.append(ModelInfo(
             id=model_id,
             name=entry.get("name") or model_id,
             free=is_free,
             pricing=pricing_label,
+            contextWindow=int(context_length) if isinstance(context_length, (int, float)) else None,
         ))
     models.sort(key=lambda m: (not m.free, m.id))
     return models
@@ -167,7 +178,13 @@ async def _fetch_google_models(api_key: str, base_url: str) -> list[ModelInfo]:
         if not model_id or "generateContent" not in methods:
             continue
         # Every Gemini API key gets a free rate-limited quota by default.
-        models.append(ModelInfo(id=model_id, name=entry.get("displayName", model_id), free=True))
+        input_limit = entry.get("inputTokenLimit")
+        models.append(ModelInfo(
+            id=model_id,
+            name=entry.get("displayName", model_id),
+            free=True,
+            contextWindow=int(input_limit) if isinstance(input_limit, (int, float)) else None,
+        ))
     models.sort(key=lambda m: m.id)
     return models
 
@@ -284,3 +301,54 @@ async def get_models_for_user_provider(
 
     models = await fetch_models_for_key(provider, api_key, base_url)
     return True, models
+
+
+def _to_usage_out(usage: ModelUsage) -> ModelUsageOut:
+    return ModelUsageOut(
+        model=usage.model,
+        limitTokens=usage.limit_tokens,
+        remainingTokens=usage.remaining_tokens,
+        limitRequests=usage.limit_requests,
+        remainingRequests=usage.remaining_requests,
+        resetTokensSeconds=usage.reset_tokens_seconds,
+        resetRequestsSeconds=usage.reset_requests_seconds,
+        capturedAt=usage.captured_at,
+        exhausted=usage.exhausted,
+    )
+
+
+def _remaining_fraction(usage: ModelUsageOut) -> float:
+    """Used only to rank models within a key by how close to exhaustion they
+    are - not shown to the user directly."""
+    if usage.limitTokens:
+        return (usage.remainingTokens or 0) / usage.limitTokens
+    if usage.limitRequests:
+        return (usage.remainingRequests or 0) / usage.limitRequests
+    return 1.0
+
+
+async def get_usage_for_provider(user_id: str, provider_str: str) -> ProviderUsageOut:
+    """Real usage captured from chat calls made under this provider's key so
+    far - not the static model catalog. A model only shows up here once it's
+    actually been called at least once."""
+    try:
+        provider = Provider(provider_str)
+    except ValueError:
+        raise AppError(400, "UNSUPPORTED_PROVIDER", f"Unknown provider: {provider_str}")
+
+    raw_usages = await get_key_usage(user_id, provider.value)
+    models_out = [_to_usage_out(u) for u in raw_usages]
+    models_out.sort(key=_remaining_fraction)
+    worst = models_out[0] if models_out else None
+
+    return ProviderUsageOut(
+        provider=provider.value,
+        tracked=bool(models_out),
+        models=models_out,
+        worst=worst,
+        exhausted=any(m.exhausted for m in models_out),
+    )
+
+
+async def get_usage_for_all_providers(user_id: str) -> list[ProviderUsageOut]:
+    return [await get_usage_for_provider(user_id, p.value) for p in SUPPORTED_PROVIDERS]

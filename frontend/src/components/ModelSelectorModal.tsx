@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   Clock,
   Cpu,
+  Gauge,
   Info,
   KeyRound,
   Layers,
@@ -19,12 +20,31 @@ import { ApiError } from '../api/client';
 import {
   CredentialStatus,
   ModelInfo as LiveModelInfo,
+  ModelUsage,
+  ProviderUsage,
   deleteCredential,
   fetchCredentialStatus,
   fetchProviderModels,
+  fetchProviderUsage,
   saveCredential
 } from '../api/credentials';
 import { fetchSettings, updateSettings } from '../api/settings';
+
+const USAGE_POLL_INTERVAL_MS = 20_000;
+
+/** Formats a raw token count the way the provider reports it — no rounding
+ * tricks, just compact grouping (e.g. 87,000 / 12.4K). */
+function formatTokenCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return `${n}`;
+}
+
+function formatContextWindow(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1)}M tokens`;
+  if (n >= 1_000) return `${Math.round(n / 1_000)}k tokens`;
+  return `${n} tokens`;
+}
 
 export interface AIModelOption {
   id: string;
@@ -231,6 +251,7 @@ const LIVE_PROVIDER_TABS: { label: string; id: string }[] = [
   { label: 'Google', id: 'google' },
   { label: 'DeepSeek', id: 'deepseek' },
   { label: 'OpenRouter', id: 'openrouter' },
+  { label: 'NVIDIA', id: 'nvidia' },
 ];
 
 interface ModelSelectorModalProps {
@@ -261,6 +282,10 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
   const [keyInput, setKeyInput] = useState('');
   const [connecting, setConnecting] = useState(false);
   const [keyError, setKeyError] = useState<string | null>(null);
+
+  // Real per-key/per-model quota, captured from actual chat calls — only
+  // populated for providers the user has actually used at least once.
+  const [providerUsage, setProviderUsage] = useState<Record<string, ProviderUsage>>({});
 
   // Sync with the real persisted setting whenever the modal opens.
   useEffect(() => {
@@ -320,6 +345,28 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
     if (!providerId || liveModels[providerId]) return;
     void loadProviderModels(providerId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterProvider, isOpen]);
+
+  // Poll real usage for whichever provider tab is active — quota changes
+  // any time a chat call goes through, independent of anything this modal
+  // triggers itself, so a snapshot-on-open would go stale fast.
+  useEffect(() => {
+    if (!isOpen || filterProvider === 'ALL') return;
+    const providerId = LIVE_PROVIDER_TABS.find(t => t.label === filterProvider)?.id;
+    if (!providerId) return;
+
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const usage = await fetchProviderUsage(providerId);
+        if (!cancelled) setProviderUsage(prev => ({ ...prev, [providerId]: usage }));
+      } catch {
+        // Non-fatal — usage display just stays stale until the next tick.
+      }
+    };
+    void poll();
+    const interval = setInterval(() => void poll(), USAGE_POLL_INTERVAL_MS);
+    return () => { cancelled = true; clearInterval(interval); };
   }, [filterProvider, isOpen]);
 
   if (!isOpen) return null;
@@ -428,6 +475,9 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
     m.name.toLowerCase().includes(searchQuery.toLowerCase()) || m.id.toLowerCase().includes(searchQuery.toLowerCase())
   );
   const isConfigured = !!activeStatus && (activeStatus.hasKey || activeStatus.envFallback);
+  const activeUsage = activeProviderId ? providerUsage[activeProviderId] : undefined;
+  const usageByModel: Record<string, ModelUsage> = {};
+  activeUsage?.models.forEach(m => { usageByModel[m.model] = m; });
 
   return (
     <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
@@ -683,6 +733,12 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                     )}
                   </div>
 
+                  {/* Per-key quota summary — the model closest to exhaustion
+                      among everything real chat calls have reported so far. */}
+                  {activeUsage?.tracked && activeUsage.worst && (
+                    <KeyUsageSummary usage={activeUsage} />
+                  )}
+
                   {freeModels.length > 0 && (
                     <div className="space-y-2">
                       <div className="flex items-center gap-1.5 text-[11px] font-bold text-green-400 uppercase tracking-wide px-1">
@@ -692,6 +748,7 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                         <LiveModelCard
                           key={model.id}
                           model={model}
+                          usage={usageByModel[model.id]}
                           isActive={activeBackend?.provider === activeProviderId && activeBackend?.model === model.id}
                           saving={saving}
                           onSelect={() => void handleSelectLiveModel(activeProviderId, model)}
@@ -709,6 +766,7 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
                         <LiveModelCard
                           key={model.id}
                           model={model}
+                          usage={usageByModel[model.id]}
                           isActive={activeBackend?.provider === activeProviderId && activeBackend?.model === model.id}
                           saving={saving}
                           onSelect={() => void handleSelectLiveModel(activeProviderId, model)}
@@ -748,53 +806,141 @@ export const ModelSelectorModal: React.FC<ModelSelectorModalProps> = ({
   );
 };
 
+/** Key-level quota summary shown right under the "Connected with your API
+ * key" line — surfaces the model closest to exhaustion among everything
+ * we've actually captured real usage for under this key. Never a fabricated
+ * account-wide number: if `usage.worst` is missing a limit, we just don't
+ * render that half of the bar. */
+const KeyUsageSummary: React.FC<{ usage: ProviderUsage }> = ({ usage }) => {
+  const worst = usage.worst;
+  if (!worst) return null;
+  const hasTokenData = worst.limitTokens != null;
+  const remaining = worst.remainingTokens ?? worst.remainingRequests ?? 0;
+  const limit = worst.limitTokens ?? worst.limitRequests ?? 0;
+  const pct = limit > 0 ? Math.max(0, Math.min(100, (remaining / limit) * 100)) : 100;
+
+  return (
+    <div
+      className={`rounded-lg border px-3 py-2 space-y-1.5 ${
+        usage.exhausted
+          ? 'bg-[#4B1113]/30 border-[#F48771]/40'
+          : 'bg-[#0D1117] border-[#30363D]'
+      }`}
+    >
+      <div className="flex items-center justify-between text-[11px]">
+        <span className="flex items-center gap-1.5 text-gray-300">
+          <Gauge className={`w-3.5 h-3.5 ${usage.exhausted ? 'text-[#F48771]' : 'text-indigo-400'}`} />
+          Key quota (closest to limit: <span className="font-mono text-gray-200">{worst.model}</span>)
+        </span>
+        <span className={`font-mono ${usage.exhausted ? 'text-[#F48771] font-bold' : 'text-gray-400'}`}>
+          {hasTokenData
+            ? `${formatTokenCount(remaining)} / ${formatTokenCount(limit)} tokens left`
+            : `${remaining} / ${limit} requests left`}
+        </span>
+      </div>
+      <div className="h-1.5 rounded-full bg-[#21262D] overflow-hidden">
+        <div
+          className={`h-full rounded-full transition-all ${
+            usage.exhausted ? 'bg-[#F48771]' : pct < 20 ? 'bg-amber-500' : 'bg-green-500'
+          }`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      {usage.exhausted && (
+        <p className="text-[10px] text-[#F48771] flex items-center gap-1">
+          <AlertTriangle className="w-3 h-3 shrink-0" />
+          This key is out of quota{worst.resetTokensSeconds ? ` — resets in ~${Math.ceil(worst.resetTokensSeconds / 60)}m` : ''}.
+        </p>
+      )}
+    </div>
+  );
+};
+
 const LiveModelCard: React.FC<{
   model: LiveModelInfo;
+  usage?: ModelUsage;
   isActive: boolean;
   saving: boolean;
   onSelect: () => void;
-}> = ({ model, isActive, saving, onSelect }) => (
-  <div
-    onClick={onSelect}
-    className={`group rounded-lg border p-3.5 transition-all cursor-pointer flex items-center justify-between gap-3 ${
-      isActive
-        ? 'bg-indigo-950/20 border-indigo-500 shadow-md shadow-indigo-950/30'
-        : 'bg-[#0D1117] border-[#30363D] hover:border-gray-500 hover:bg-[#161B22]'
-    }`}
-  >
-    <div className="flex items-center gap-2 min-w-0">
-      <span className={`w-2 h-2 rounded-full shrink-0 ${model.free ? 'bg-green-500' : 'bg-amber-500'}`} />
-      <div className="min-w-0">
-        <div className="flex items-center gap-2">
-          <h4 className="text-xs font-bold text-white font-mono truncate">{model.name}</h4>
-          {isActive && (
-            <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-green-500/20 text-green-300 border border-green-500/40 shrink-0">
-              ACTIVE
-            </span>
-          )}
-        </div>
-        {model.pricing && <p className="text-[10px] text-gray-500 mt-0.5">{model.pricing}</p>}
-      </div>
-    </div>
+}> = ({ model, usage, isActive, saving, onSelect }) => {
+  const hasTokenData = usage?.limitTokens != null;
+  const remaining = usage?.remainingTokens ?? usage?.remainingRequests ?? null;
+  const limit = usage?.limitTokens ?? usage?.limitRequests ?? null;
+  const usagePct = limit && limit > 0 ? Math.max(0, Math.min(100, ((remaining ?? 0) / limit) * 100)) : null;
 
-    <button
-      onClick={(e) => { e.stopPropagation(); onSelect(); }}
-      disabled={saving}
-      className={`px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50 shrink-0 ${
+  return (
+    <div
+      onClick={onSelect}
+      className={`group rounded-lg border p-3.5 transition-all cursor-pointer flex items-center justify-between gap-3 ${
         isActive
-          ? 'bg-green-600 text-white'
-          : 'bg-[#21262D] hover:bg-indigo-600 text-gray-200 hover:text-white border border-[#30363D]'
+          ? 'bg-indigo-950/20 border-indigo-500 shadow-md shadow-indigo-950/30'
+          : 'bg-[#0D1117] border-[#30363D] hover:border-gray-500 hover:bg-[#161B22]'
       }`}
     >
-      {saving && isActive ? (
-        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-      ) : isActive ? (
-        <>
-          <Check className="w-3.5 h-3.5" /> <span>Active</span>
-        </>
-      ) : (
-        <span>Select</span>
-      )}
-    </button>
-  </div>
-);
+      <div className="flex items-center gap-2 min-w-0 flex-1">
+        <span className={`w-2 h-2 rounded-full shrink-0 ${model.free ? 'bg-green-500' : 'bg-amber-500'}`} />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <h4 className="text-xs font-bold text-white font-mono truncate">{model.name}</h4>
+            {isActive && (
+              <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-green-500/20 text-green-300 border border-green-500/40 shrink-0">
+                ACTIVE
+              </span>
+            )}
+            {usage?.exhausted && (
+              <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-[#4B1113]/40 text-[#F48771] border border-[#F48771]/40 shrink-0 flex items-center gap-1">
+                <AlertTriangle className="w-2.5 h-2.5" /> QUOTA EXHAUSTED
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-2 flex-wrap mt-0.5">
+            {model.contextWindow != null && (
+              <span className="text-[10px] text-gray-500 flex items-center gap-1">
+                <Layers className="w-2.5 h-2.5" />
+                {formatContextWindow(model.contextWindow)}
+              </span>
+            )}
+            {model.pricing && <p className="text-[10px] text-gray-500">{model.pricing}</p>}
+          </div>
+          {/* Real usage — only shown once this model has actually been
+              called, since that's the only way any provider reports it. */}
+          {usagePct != null && (
+            <div className="flex items-center gap-2 mt-1.5 max-w-xs">
+              <div className="h-1 flex-1 rounded-full bg-[#21262D] overflow-hidden">
+                <div
+                  className={`h-full rounded-full ${
+                    usage?.exhausted ? 'bg-[#F48771]' : usagePct < 20 ? 'bg-amber-500' : 'bg-green-500'
+                  }`}
+                  style={{ width: `${usagePct}%` }}
+                />
+              </div>
+              <span className="text-[9px] text-gray-500 font-mono whitespace-nowrap">
+                {hasTokenData ? `${formatTokenCount(remaining ?? 0)}/${formatTokenCount(limit ?? 0)} tok` : `${remaining}/${limit} req`}
+              </span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <button
+        onClick={(e) => { e.stopPropagation(); onSelect(); }}
+        disabled={saving}
+        className={`px-3 py-1.5 rounded-md text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50 shrink-0 ${
+          isActive
+            ? 'bg-green-600 text-white'
+            : 'bg-[#21262D] hover:bg-indigo-600 text-gray-200 hover:text-white border border-[#30363D]'
+        }`}
+      >
+        {saving && isActive ? (
+          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+        ) : isActive ? (
+          <>
+            <Check className="w-3.5 h-3.5" /> <span>Active</span>
+          </>
+        ) : (
+          <span>Select</span>
+        )}
+      </button>
+    </div>
+  );
+};

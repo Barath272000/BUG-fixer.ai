@@ -14,12 +14,15 @@ import {
   sendCopilotMessage,
   setProposalStatus,
 } from '../api/copilot';
-import { saveWorkspaceFile } from '../api/workspace';
+import { fetchWorkspaceFile, saveWorkspaceFile } from '../api/workspace';
 import { ApiError } from '../api/client';
 
 interface AgentPanelProps {
   projectId: string | null;
   activeModel: string;
+  /** Workspace-relative path of the file currently open in the editor, so the
+   * agent can see it automatically without the user having to name it. */
+  activePath?: string | null;
   /** Called after a proposal is approved and written to disk, so the editor/tree can refresh. */
   onFileWritten?: (path: string) => void;
   /** Called when the user clicks the panel's own minimize arrow. */
@@ -28,7 +31,7 @@ interface AgentPanelProps {
 
 type ProposalUiStatus = 'idle' | 'applying' | 'applied' | 'rejected' | 'error';
 
-export const AgentPanel: React.FC<AgentPanelProps> = ({ projectId, activeModel, onFileWritten, onCollapse }) => {
+export const AgentPanel: React.FC<AgentPanelProps> = ({ projectId, activeModel, activePath, onFileWritten, onCollapse }) => {
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<CopilotMessage[]>([]);
   const [input, setInput] = useState('');
@@ -68,7 +71,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ projectId, activeModel, 
     setError(null);
 
     try {
-      const reply = await sendCopilotMessage(conversationId, text);
+      const reply = await sendCopilotMessage(conversationId, text, undefined, undefined, activePath ?? undefined);
       setMessages(prev => [...prev, reply]);
     } catch (err) {
       setError(
@@ -86,12 +89,37 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ projectId, activeModel, 
     if (!proposal) return;
     setProposalStatuses(prev => ({ ...prev, [proposal.id]: 'applying' }));
     try {
-      // Write the proposed code to the real file via the workspace API, then
-      // mark the proposal approved. Both must happen for "Apply" to mean anything.
+      // proposal.proposedCode is only the replacement snippet for
+      // startLine..endLine, not the whole file — read the current file and
+      // splice it in with a single find-and-replace of originalCode, the
+      // same approach backend/app/modules/fixes/patch_service.py uses for
+      // the Fixes flow. Writing proposedCode straight to disk would blow
+      // away the rest of the file.
+      //
+      // Exception: the proposal may target a file that doesn't exist yet
+      // (the AI proposing a brand-new file, e.g. as part of a "rename").
+      // In that case there's no existing content to patch into — just
+      // write proposedCode as the new file's full content. Note this app
+      // has no delete-as-part-of-apply step, so a "rename" proposal will
+      // leave the old file behind; the user has to remove it separately.
       if (!projectId) {
         throw new ApiError(0, 'No project selected yet.');
       }
-      await saveWorkspaceFile(projectId, proposal.file, proposal.proposedCode);
+      let current: string | null = null;
+      try {
+        current = (await fetchWorkspaceFile(projectId, proposal.file)).content;
+      } catch (err) {
+        if (!(err instanceof ApiError && err.code === 'NOT_A_FILE')) throw err;
+      }
+      let updated: string;
+      if (current === null) {
+        updated = proposal.proposedCode;
+      } else if (current.includes(proposal.originalCode)) {
+        updated = current.replace(proposal.originalCode, proposal.proposedCode);
+      } else {
+        throw new ApiError(0, 'The file has changed since this proposal was made — original code context was not found.');
+      }
+      await saveWorkspaceFile(projectId, proposal.file, updated);
       await setProposalStatus(proposal.id, 'APPROVED_AND_APPLIED');
       setProposalStatuses(prev => ({ ...prev, [proposal.id]: 'applied' }));
       onFileWritten?.(proposal.file);

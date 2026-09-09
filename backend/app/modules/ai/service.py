@@ -20,10 +20,11 @@ from app.modules.ai.context_builder import build_ai_context
 from app.modules.ai.model_router import resolve_model
 from app.modules.ai.prompt_builder import build_copilot_prompt, build_diagnosis_prompt
 from app.modules.ai.providers.anthropic_provider import AnthropicProvider
-from app.modules.ai.providers.base import AIProvider, ChatRequest
+from app.modules.ai.providers.base import AIProvider, ChatRequest, ProviderChatError
 from app.modules.ai.providers.google_provider import GoogleProvider
 from app.modules.ai.providers.openai_compatible_provider import OpenAICompatibleProvider
 from app.modules.ai.providers.openai_provider import OpenAIProvider
+from app.modules.ai.usage_tracking import record_rate_limit
 
 _ENV_KEY_MAP = {
     "openai": lambda: settings.OPENAI_API_KEY,
@@ -111,16 +112,26 @@ async def diagnose_bug(
     creds = await _credentials(db, user_id, resolved.provider)
     context = await build_ai_context(db, project_id, bug_id=bug_id)
 
-    text = await _provider_for(resolved.provider).chat(
-        ChatRequest(
-            model=resolved.model,
-            system="You are a senior debugging engineer.",
-            user=build_diagnosis_prompt(context),
-            api_key=creds["key"],
-            base_url=creds["base_url"],
-        )
+    chat_request = ChatRequest(
+        model=resolved.model,
+        system="You are a senior debugging engineer.",
+        user=build_diagnosis_prompt(context),
+        api_key=creds["key"],
+        base_url=creds["base_url"],
     )
-    result = _parse_json(text)
+    try:
+        chat_result = await _provider_for(resolved.provider).chat(chat_request)
+    except ProviderChatError as exc:
+        # A 429 reports remaining=0 in its headers - record that real usage
+        # data even though the call itself failed, then let it propagate.
+        if exc.rate_limit:
+            await record_rate_limit(user_id, resolved.provider, resolved.model, exc.rate_limit)
+        raise
+
+    if chat_result.rate_limit:
+        await record_rate_limit(user_id, resolved.provider, resolved.model, chat_result.rate_limit)
+
+    result = _parse_json(chat_result.text)
 
     return {
         "provider": resolved.provider,
@@ -143,22 +154,28 @@ async def copilot_reply(
     user_message: str,
     provider: str | None = None,
     model: str | None = None,
+    file_path: str | None = None,
 ) -> dict:
     resolved = await resolve_model(db, provider, model, user_id)
     creds = await _credentials(db, user_id, resolved.provider)
-    context = await build_ai_context(db, project_id, question=user_message) if project_id else "{}"
+    context = await build_ai_context(db, project_id, user_id=user_id, file_path=file_path, question=user_message) if project_id else "{}"
 
+    chat_request = ChatRequest(
+        model=resolved.model,
+        system="You are a repository-aware coding copilot.",
+        user=build_copilot_prompt(context, user_message),
+        api_key=creds["key"],
+        base_url=creds["base_url"],
+    )
     try:
-        text = await _provider_for(resolved.provider).chat(
-            ChatRequest(
-                model=resolved.model,
-                system="You are a repository-aware coding copilot.",
-                user=build_copilot_prompt(context, user_message),
-                api_key=creds["key"],
-                base_url=creds["base_url"],
-            )
-        )
-        result = _parse_json(text)
+        chat_result = await _provider_for(resolved.provider).chat(chat_request)
+        if chat_result.rate_limit:
+            await record_rate_limit(user_id, resolved.provider, resolved.model, chat_result.rate_limit)
+        result = _parse_json(chat_result.text)
+    except ProviderChatError as exc:
+        if exc.rate_limit:
+            await record_rate_limit(user_id, resolved.provider, resolved.model, exc.rate_limit)
+        raise AppError(502, "AI_PROVIDER_ERROR", str(exc)) from exc
     except ValueError as exc:
         raise AppError(502, "AI_PROVIDER_ERROR", str(exc)) from exc
     return {"provider": resolved.provider, "model": resolved.model, "result": result}

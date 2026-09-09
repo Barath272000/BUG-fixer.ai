@@ -150,6 +150,15 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
   const [treeLoading, setTreeLoading] = useState(true);
   const [treeError, setTreeError] = useState<string | null>(null);
   const [openFolders, setOpenFolders] = useState<Record<string, boolean>>({});
+  // Explorer-only selection (separate from activePath): lets Delete/F2 act on
+  // whichever file or folder was last clicked/right-clicked in the tree,
+  // without changing the existing click-to-open behavior.
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  const explorerTreeRef = useRef<HTMLDivElement>(null);
+  // Clipboard for Explorer Copy/Paste (duplicate a file or folder elsewhere
+  // in the workspace). Deliberately not bound to Ctrl+C/Ctrl+V globally —
+  // that would hijack normal text copy/paste everywhere else on the page.
+  const [explorerClipboard, setExplorerClipboard] = useState<{ path: string; type: 'file' | 'folder' } | null>(null);
 
   // --- Open files / editor state ---
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([]);
@@ -379,6 +388,17 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
     setOpenFolders(prev => ({ ...prev, [path]: !prev[path] }));
   };
 
+  const findTreeNode = (nodes: WorkspaceTreeNode[], path: string): WorkspaceTreeNode | null => {
+    for (const n of nodes) {
+      if (n.path === path) return n;
+      if (n.type === 'folder' && n.children) {
+        const found = findTreeNode(n.children, path);
+        if (found) return found;
+      }
+    }
+    return null;
+  };
+
   const openFile = async (path: string) => {
     setActivePath(path);
     setFileError(null);
@@ -459,6 +479,36 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [activePath, saveFile]);
+
+  // Workspace-shell shortcuts: focus Explorer, toggle terminal, open Search,
+  // toggle sidebar. Global by design (should work regardless of which panel
+  // has focus, same as real VS Code) — safe because these are all
+  // Ctrl/Cmd-modified combos that never produce plain typed characters, so
+  // they can't collide with normal typing in the editor, chat box, etc.
+  // Monaco's own shortcuts (undo, find-in-file, Ctrl+/, etc.) are NOT
+  // duplicated here — Monaco already handles those itself.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const mod = e.ctrlKey || e.metaKey;
+      if (!mod) return;
+      if (e.shiftKey && e.key.toLowerCase() === 'e') {
+        e.preventDefault();
+        setActivityView('explorer');
+      } else if (!e.shiftKey && e.key === '`') {
+        e.preventDefault();
+        setBottomPanelOpen(true);
+        setBottomTab('terminal');
+      } else if (e.shiftKey && e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        setActivityView('search');
+      } else if (!e.shiftKey && e.key.toLowerCase() === 'b') {
+        e.preventDefault();
+        setActivityView(prev => (prev === 'none' ? 'explorer' : 'none'));
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
 
   // Auto Save: when enabled, save the active file 1.5s after the user stops typing.
   useEffect(() => {
@@ -551,6 +601,7 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
       };
       setOpenFiles(prev => prev.map(f => ({ ...f, path: remap(f.path) })));
       setActivePath(prev => (prev ? remap(prev) : prev));
+      setSelectedPath(prev => (prev ? remap(prev) : prev));
       setOpenFolders(prev => {
         const next: Record<string, boolean> = {};
         for (const [p, v] of Object.entries(prev)) next[remap(p)] = v;
@@ -583,6 +634,7 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
       await deleteWorkspacePath(projectId, node.path);
       setOpenFiles(prev => prev.filter(f => !isRemoved(f.path)));
       setActivePath(prev => (prev && isRemoved(prev) ? null : prev));
+      setSelectedPath(prev => (prev && isRemoved(prev) ? null : prev));
       await loadTree();
     } catch (err) {
       setFileError(err instanceof ApiError ? err.message : 'Failed to delete.');
@@ -601,6 +653,96 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
     } catch {
       setFileError('Could not copy to clipboard.');
     }
+  };
+
+  // --- Copy / Paste a file or folder (Explorer context menu + F2/Delete shortcuts) ---
+  // Deliberately separate from copyPathToClipboard above: this duplicates the
+  // actual file/folder content elsewhere in the workspace, not just its path text.
+  const handleCopyNode = (node: WorkspaceTreeNode) => {
+    setContextMenu(null);
+    setExplorerClipboard({ path: node.path, type: node.type });
+    setStatusMessage(`Copied "${node.name}" — right-click a destination and choose Paste`);
+    setTimeout(() => setStatusMessage(null), 2500);
+  };
+
+  /** Picks a name that doesn't collide with an existing sibling, e.g. "foo.ts" -> "foo (copy).ts". */
+  const uniqueDestName = (parent: string, baseName: string): string => {
+    const dot = baseName.lastIndexOf('.');
+    const stem = dot > 0 ? baseName.slice(0, dot) : baseName;
+    const ext = dot > 0 ? baseName.slice(dot) : '';
+    let candidate = baseName;
+    let n = 1;
+    while (findTreeNode(tree, parent ? `${parent}/${candidate}` : candidate)) {
+      candidate = n === 1 ? `${stem} (copy)${ext}` : `${stem} (copy ${n})${ext}`;
+      n += 1;
+    }
+    return candidate;
+  };
+
+  const handlePasteNode = async (targetFolderPath: string) => {
+    setContextMenu(null);
+    if (!explorerClipboard || !projectId) return;
+    const source = findTreeNode(tree, explorerClipboard.path);
+    if (!source) {
+      setFileError('The copied item no longer exists.');
+      return;
+    }
+    setSaving(true);
+    setFileError(null);
+    try {
+      if (source.type === 'file') {
+        const destName = uniqueDestName(targetFolderPath, source.name);
+        const destPath = targetFolderPath ? `${targetFolderPath}/${destName}` : destName;
+        const { content } = await fetchWorkspaceFile(projectId, source.path);
+        await saveWorkspaceFile(projectId, destPath, content);
+      } else {
+        // Folder copy: walk the already-loaded subtree client-side and copy each
+        // file underneath to the same relative position under the new folder name.
+        // write_file() creates parent directories automatically, so no separate
+        // "create folder" calls are needed.
+        const destFolderName = uniqueDestName(targetFolderPath, source.name);
+        const destFolderPath = targetFolderPath ? `${targetFolderPath}/${destFolderName}` : destFolderName;
+        const copyRecursive = async (n: WorkspaceTreeNode, destBase: string) => {
+          if (n.type === 'file') {
+            const { content } = await fetchWorkspaceFile(projectId, n.path);
+            await saveWorkspaceFile(projectId, destBase, content);
+          } else {
+            for (const child of n.children ?? []) {
+              await copyRecursive(child, `${destBase}/${child.name}`);
+            }
+          }
+        };
+        await copyRecursive(source, destFolderPath);
+      }
+      await loadTree();
+    } catch (err) {
+      setFileError(err instanceof ApiError ? err.message : 'Failed to paste.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // --- Keyboard shortcuts scoped to the Explorer tree itself (Delete, F2) ---
+  // Attached directly to the tree container's onKeyDown (not a global window
+  // listener) so these only fire while the Explorer has focus — they can't
+  // interfere with Delete/Backspace while typing in Monaco, the rename input,
+  // the chat box, or anywhere else on the page.
+  const handleExplorerKeyDown = (e: React.KeyboardEvent) => {
+    if (!selectedPath || renamingPath) return;
+    const node = findTreeNode(tree, selectedPath);
+    if (!node) return;
+    if (e.key === 'Delete') {
+      e.preventDefault();
+      void handleDeleteNode(node);
+    } else if (e.key === 'F2') {
+      e.preventDefault();
+      startRename(node);
+    }
+  };
+
+  const selectNode = (node: WorkspaceTreeNode) => {
+    setSelectedPath(node.path);
+    explorerTreeRef.current?.focus();
   };
 
   // --- Menu bar wiring ---
@@ -642,10 +784,14 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
             <div
               className="flex items-center gap-1.5 px-2 py-1 hover:bg-[#2A2D2E] cursor-pointer group"
               style={{ paddingLeft: `${8 + depth * 14}px` }}
-              onClick={() => toggleFolder(node.path)}
+              onClick={() => {
+                selectNode(node);
+                toggleFolder(node.path);
+              }}
               onContextMenu={e => {
                 e.preventDefault();
                 e.stopPropagation();
+                selectNode(node);
                 setContextMenu({ x: e.clientX, y: e.clientY, node });
               }}
             >
@@ -728,10 +874,14 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
       return (
         <div
           key={node.path}
-          onClick={() => void openFile(node.path)}
+          onClick={() => {
+            selectNode(node);
+            void openFile(node.path);
+          }}
           onContextMenu={e => {
             e.preventDefault();
             e.stopPropagation();
+            selectNode(node);
             setContextMenu({ x: e.clientX, y: e.clientY, node });
           }}
           className={`flex items-center gap-1.5 px-2 py-1 rounded cursor-pointer ${
@@ -875,11 +1025,15 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
           </div>
 
           <div
-            className="flex-1 overflow-y-auto py-1"
+            ref={explorerTreeRef}
+            tabIndex={0}
+            className="flex-1 overflow-y-auto py-1 outline-none"
             onContextMenu={e => {
               e.preventDefault();
+              setSelectedPath(null);
               setContextMenu({ x: e.clientX, y: e.clientY, node: null });
             }}
+            onKeyDown={handleExplorerKeyDown}
           >
             {treeLoading && tree.length === 0 && (
               <div className="flex items-center gap-2 px-3 py-3 text-[#858585]">
@@ -1375,6 +1529,7 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
           <AgentPanel
             projectId={projectId}
             activeModel={activeModel}
+            activePath={activeFile?.path ?? null}
             onCollapse={() => setAgentPanelOpen(false)}
             onFileWritten={(path) => {
               // Refresh the file if it's currently open, and always refresh the tree
@@ -1513,6 +1668,15 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
                 <FolderPlus className="w-3.5 h-3.5" />
                 New Folder
               </button>
+              {explorerClipboard && (
+                <button
+                  onClick={() => void handlePasteNode('')}
+                  className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-[#04395E] hover:text-white text-left"
+                >
+                  <CopyIcon className="w-3.5 h-3.5" />
+                  Paste
+                </button>
+              )}
             </>
           ) : (
             <>
@@ -1540,6 +1704,15 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
                     <FolderPlus className="w-3.5 h-3.5" />
                     New Folder
                   </button>
+                  {explorerClipboard && (
+                    <button
+                      onClick={() => void handlePasteNode(contextMenu.node!.path)}
+                      className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-[#04395E] hover:text-white text-left"
+                    >
+                      <CopyIcon className="w-3.5 h-3.5" />
+                      Paste
+                    </button>
+                  )}
                   <div className="h-px bg-[#454545] my-1" />
                 </>
               )}
@@ -1549,6 +1722,13 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
               >
                 <Pencil className="w-3.5 h-3.5" />
                 Rename...
+              </button>
+              <button
+                onClick={() => handleCopyNode(contextMenu.node!)}
+                className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-[#04395E] hover:text-white text-left"
+              >
+                <CopyIcon className="w-3.5 h-3.5" />
+                Copy
               </button>
               <button
                 onClick={() => handleDeleteNode(contextMenu.node!)}

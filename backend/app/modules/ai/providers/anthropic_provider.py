@@ -2,15 +2,17 @@
 import httpx
 
 from app.core.config import settings
-from app.modules.ai.providers.base import AIProvider, ChatRequest
+from app.modules.ai.providers.base import AIProvider, ChatRequest, ChatResult, ProviderChatError
+from app.modules.ai.rate_limit_headers import parse_rate_limit_headers
 
 
 class AnthropicProvider(AIProvider):
-    async def chat(self, request: ChatRequest) -> str:
+    async def chat(self, request: ChatRequest) -> ChatResult:
+        if not request.api_key:
+            raise ProviderChatError("Anthropic provider error: Anthropic API key is not configured")
+
+        base_url = request.base_url or settings.ANTHROPIC_BASE_URL
         try:
-            if not request.api_key:
-                raise ValueError("Anthropic API key is not configured")
-            base_url = request.base_url or settings.ANTHROPIC_BASE_URL
             async with httpx.AsyncClient(timeout=120) as client:
                 response = await client.post(
                     f"{base_url}/v1/messages",
@@ -27,12 +29,22 @@ class AnthropicProvider(AIProvider):
                         "max_tokens": request.max_tokens,
                     },
                 )
-            if response.status_code >= 400:
-                raise ValueError(f"Anthropic request failed with status {response.status_code}")
+        except Exception as exc:  # noqa: BLE001
+            raise ProviderChatError(f"Anthropic provider error: {exc}") from exc
+
+        # Captured before the status check: a 429 reports remaining=0, which
+        # is exactly the "quota exhausted" signal usage_tracking needs.
+        rate_limit = parse_rate_limit_headers(response.headers)
+        if response.status_code >= 400:
+            raise ProviderChatError(
+                f"Anthropic provider error: Anthropic request failed with status {response.status_code}",
+                rate_limit=rate_limit,
+            )
+        try:
             data = response.json()
             text = "\n".join(part.get("text", "") for part in data.get("content", [])).strip()
             if not text:
                 raise ValueError("Anthropic returned an empty response")
-            return text
         except Exception as exc:  # noqa: BLE001
-            raise ValueError(f"Anthropic provider error: {exc}") from exc
+            raise ProviderChatError(f"Anthropic provider error: {exc}", rate_limit=rate_limit) from exc
+        return ChatResult(text=text, rate_limit=rate_limit)

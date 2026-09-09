@@ -12,6 +12,7 @@ class SendMessageRequest(BaseModel):
     text: str = Field(min_length=1, max_length=20000)
     provider: str | None = None
     model: str | None = None
+    filePath: str | None = None
 
 
 class SetProposalStatusRequest(BaseModel):

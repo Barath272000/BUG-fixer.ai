@@ -8,7 +8,128 @@ import {
   Square,
   X,
   Bot,
+  AlertTriangle,
+  Gauge,
 } from 'lucide-react';
+import { ProviderUsage, fetchAllProviderUsage } from '../api/credentials';
+
+const USAGE_POLL_INTERVAL_MS = 20_000;
+
+/** Persistent badge + one-time toast for provider quota exhaustion. Polls
+ * independently of the model-selector modal, since exhaustion can happen
+ * mid-session while the modal is closed (that's the whole point). */
+const UsageAlertBadge: React.FC = () => {
+  const [usages, setUsages] = useState<ProviderUsage[]>([]);
+  const [isOpen, setIsOpen] = useState(false);
+  const [toast, setToast] = useState<ProviderUsage | null>(null);
+  const alreadyToasted = useRef<Set<string>>(new Set());
+  const wrapperRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const all = await fetchAllProviderUsage();
+        if (cancelled) return;
+        setUsages(all);
+        // Fire a one-time toast per provider the first time it flips to
+        // exhausted — never repeat it every poll tick while it stays there.
+        for (const u of all) {
+          if (u.exhausted && !alreadyToasted.current.has(u.provider)) {
+            alreadyToasted.current.add(u.provider);
+            setToast(u);
+          } else if (!u.exhausted && alreadyToasted.current.has(u.provider)) {
+            // Quota reset (new window) — allow a fresh toast if it runs out again.
+            alreadyToasted.current.delete(u.provider);
+          }
+        }
+      } catch {
+        // Non-fatal — badge just stays at its last known state.
+      }
+    };
+    void poll();
+    const interval = setInterval(() => void poll(), USAGE_POLL_INTERVAL_MS);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, []);
+
+  useEffect(() => {
+    if (!toast) return;
+    const timer = setTimeout(() => setToast(null), 6000);
+    return () => clearTimeout(timer);
+  }, [toast]);
+
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (wrapperRef.current && !wrapperRef.current.contains(event.target as Node)) {
+        setIsOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const trackedUsages = usages.filter(u => u.tracked);
+  const exhaustedUsages = trackedUsages.filter(u => u.exhausted);
+
+  return (
+    <div className="relative" ref={wrapperRef}>
+      {/* One-time toast on the transition to exhausted */}
+      {toast && (
+        <div className="absolute top-full right-0 mt-2 w-72 bg-[#252526] border border-[#F48771]/50 rounded-lg shadow-2xl p-3 z-[200] animate-in fade-in slide-in-from-top-1 duration-150">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="w-4 h-4 text-[#F48771] shrink-0 mt-0.5" />
+            <div className="min-w-0">
+              <p className="text-xs font-bold text-white capitalize">{toast.provider} quota exhausted</p>
+              <p className="text-[11px] text-gray-400 mt-0.5">
+                {toast.worst?.model ?? 'A model'} on your {toast.provider} key has run out of tokens.
+                {toast.worst?.resetTokensSeconds
+                  ? ` Resets in ~${Math.ceil(toast.worst.resetTokensSeconds / 60)}m.`
+                  : ' Switch models or add a different key to keep going.'}
+              </p>
+            </div>
+            <button onClick={() => setToast(null)} className="text-gray-500 hover:text-white shrink-0 cursor-pointer">
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Persistent badge — only rendered once at least one key has ever been used */}
+      {trackedUsages.length > 0 && (
+        <button
+          onClick={() => setIsOpen(o => !o)}
+          className={`flex items-center gap-1 p-1 rounded hover:bg-[#2D2D2D] transition-colors cursor-pointer ${
+            exhaustedUsages.length > 0 ? 'text-[#F48771]' : 'text-[#858585] hover:text-white'
+          }`}
+          title="AI engine quota"
+        >
+          <Gauge className="w-3.5 h-3.5" />
+          {exhaustedUsages.length > 0 && (
+            <span className="w-1.5 h-1.5 rounded-full bg-[#F48771] animate-pulse" />
+          )}
+        </button>
+      )}
+
+      {isOpen && trackedUsages.length > 0 && (
+        <div className="absolute top-full right-0 mt-1 min-w-[220px] bg-[#252526] border border-[#454545] rounded shadow-2xl py-1.5 z-[110] text-[12px]">
+          {trackedUsages.map(u => {
+            const worst = u.worst;
+            const remaining = worst?.remainingTokens ?? worst?.remainingRequests;
+            const limit = worst?.limitTokens ?? worst?.limitRequests;
+            return (
+              <div key={u.provider} className="px-3 py-1.5 flex items-center justify-between gap-3">
+                <span className="capitalize text-[#CCCCCC]">{u.provider}</span>
+                <span className={`font-mono text-[11px] ${u.exhausted ? 'text-[#F48771] font-bold' : 'text-[#858585]'}`}>
+                  {remaining != null && limit != null ? `${remaining}/${limit}` : '—'}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+};
 
 export interface MenuItem {
   id: string;
@@ -550,6 +671,9 @@ export const IdeMenuBar: React.FC<IdeMenuBarProps> = ({
         >
           <Bot className="w-3.5 h-3.5" />
         </button>
+
+        {/* AI engine quota — persistent badge + one-time toast on exhaustion */}
+        <UsageAlertBadge />
 
         <div className="h-3.5 w-[1px] bg-[#333333] mx-1" />
 
