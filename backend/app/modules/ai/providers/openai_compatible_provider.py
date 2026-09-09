@@ -1,4 +1,6 @@
 """Mirrors: backend/src/modules/ai/providers/openai-compatible.provider.ts"""
+import ssl
+
 import httpx
 
 from app.modules.ai.providers.base import AIProvider, ChatRequest, ChatResult, ProviderChatError
@@ -28,6 +30,11 @@ class OpenAICompatibleProvider(AIProvider):
                         "max_tokens": request.max_tokens,
                     },
                 )
+        except ssl.SSLCertVerificationError as exc:
+            raise ProviderChatError(
+                f"{self.name} provider error: TLS certificate mismatch for '{request.base_url}'. "
+                f"Double-check {self.name.upper()}_BASE_URL in backend/.env."
+            ) from exc
         except Exception as exc:  # noqa: BLE001
             raise ProviderChatError(f"{self.name} provider error: {exc}") from exc
 

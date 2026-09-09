@@ -96,8 +96,15 @@ def _parse_json(text: str) -> dict:
         start = clean.find("{")
         end = clean.rfind("}")
         if start >= 0 and end > start:
-            return json.loads(clean[start : end + 1])
-        raise ValueError("AI response is not valid JSON")
+            try:
+                return json.loads(clean[start : end + 1])
+            except json.JSONDecodeError:
+                pass
+        raise ValueError(
+            "The AI model's reply wasn't valid JSON, so it couldn't be parsed. "
+            "This can happen with reasoning models on complex files — try again, "
+            "or switch to a non-reasoning model for this task."
+        )
 
 
 async def diagnose_bug(

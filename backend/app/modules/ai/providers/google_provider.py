@@ -2,6 +2,7 @@
 from urllib.parse import quote
 
 import httpx
+import ssl
 
 from app.core.config import settings
 from app.modules.ai.providers.base import AIProvider, ChatRequest, ChatResult, ProviderChatError
@@ -29,6 +30,11 @@ class GoogleProvider(AIProvider):
                         },
                     },
                 )
+        except ssl.SSLCertVerificationError as exc:
+            raise ProviderChatError(
+                f"Google provider error: TLS certificate mismatch for '{base_url}'. "
+                f"Double-check GOOGLE_BASE_URL in backend/.env."
+            ) from exc
         except Exception as exc:  # noqa: BLE001
             raise ProviderChatError(f"Google provider error: {exc}") from exc
 

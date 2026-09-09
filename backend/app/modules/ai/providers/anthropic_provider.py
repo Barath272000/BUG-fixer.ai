@@ -1,5 +1,6 @@
 """Mirrors: backend/src/modules/ai/providers/anthropic.provider.ts"""
 import httpx
+import ssl
 
 from app.core.config import settings
 from app.modules.ai.providers.base import AIProvider, ChatRequest, ChatResult, ProviderChatError
@@ -29,6 +30,11 @@ class AnthropicProvider(AIProvider):
                         "max_tokens": request.max_tokens,
                     },
                 )
+        except ssl.SSLCertVerificationError as exc:
+            raise ProviderChatError(
+                f"Anthropic provider error: TLS certificate mismatch for '{base_url}'. "
+                f"Double-check ANTHROPIC_BASE_URL in backend/.env."
+            ) from exc
         except Exception as exc:  # noqa: BLE001
             raise ProviderChatError(f"Anthropic provider error: {exc}") from exc
 

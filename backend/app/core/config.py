@@ -4,9 +4,23 @@ Mirrors: backend/src/config/env.ts (zod schema -> pydantic-settings)
 """
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import urlparse
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Expected host for each provider's base URL. Used to catch typos in .env
+# early (at startup) instead of letting them surface as confusing SSL/
+# hostname-mismatch errors deep inside a provider HTTP call.
+_EXPECTED_HOSTS = {
+    "OPENAI_BASE_URL": "api.openai.com",
+    "ANTHROPIC_BASE_URL": "api.anthropic.com",
+    "GOOGLE_BASE_URL": "generativelanguage.googleapis.com",
+    "GROQ_BASE_URL": "api.groq.com",
+    "OPENROUTER_BASE_URL": "openrouter.ai",
+    "DEEPSEEK_BASE_URL": "api.deepseek.com",
+    "NVIDIA_BASE_URL": "integrate.api.nvidia.com",
+}
 
 
 class Settings(BaseSettings):
@@ -68,6 +82,26 @@ class Settings(BaseSettings):
         # SQLAlchemy async needs the asyncpg dialect explicitly.
         if v.startswith("postgresql://"):
             return v.replace("postgresql://", "postgresql+asyncpg://", 1)
+        return v
+
+    @field_validator(
+        "OPENAI_BASE_URL",
+        "ANTHROPIC_BASE_URL",
+        "GOOGLE_BASE_URL",
+        "GROQ_BASE_URL",
+        "OPENROUTER_BASE_URL",
+        "DEEPSEEK_BASE_URL",
+        "NVIDIA_BASE_URL",
+    )
+    @classmethod
+    def _check_base_url_host(cls, v: str, info) -> str:
+        expected = _EXPECTED_HOSTS.get(info.field_name)
+        actual = urlparse(v).hostname
+        if expected and actual != expected:
+            raise ValueError(
+                f"{info.field_name} looks wrong: expected host '{expected}', "
+                f"got '{actual}'. Check backend/.env for a typo."
+            )
         return v
 
 
