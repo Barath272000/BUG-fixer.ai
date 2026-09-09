@@ -14,9 +14,16 @@ async def detect_build_command(root: str, language: str) -> str:
         except (FileNotFoundError, json.JSONDecodeError):
             return "npm install --ignore-scripts"
     if language == "Python":
-        return "python -m compileall -q ."
+        # python:3.12-slim ships no third-party packages, so best-effort
+        # install the project's own deps first (silently skipped if there's
+        # no requirements.txt, or if the sandbox has no network — see
+        # SANDBOX_NETWORK_MODE in .env) before the actual build check.
+        return (
+            "[ -f requirements.txt ] && pip install -q -r requirements.txt "
+            "|| true; python -m compileall -q ."
+        )
     if language == "Go":
-        return "go test ./..."
+        return "go build ./..."
     if language == "Rust":
         return "cargo check"
     return 'echo "No supported build command detected"'
@@ -24,11 +31,16 @@ async def detect_build_command(root: str, language: str) -> str:
 
 async def detect_test_command(root: str, language: str) -> str:
     if language == "Python":
-        if os.path.exists(os.path.join(root, "pytest.ini")):
-            return "pytest"
-        if os.path.exists(os.path.join(root, "pyproject.toml")):
-            return "pytest"
-        return "python -m unittest"
+        uses_pytest = os.path.exists(os.path.join(root, "pytest.ini")) or os.path.exists(
+            os.path.join(root, "pyproject.toml")
+        )
+        if uses_pytest:
+            # pytest isn't in the base image; install it best-effort, then run.
+            # If the sandbox has no network (SANDBOX_NETWORK_MODE=none, the
+            # default), this install is a no-op and the run fails honestly
+            # with "pytest: not found" rather than silently passing.
+            return "pip install -q pytest 2>/dev/null; pytest"
+        return "python -m unittest discover"
     if language in ("JavaScript", "TypeScript"):
         pkg_path = os.path.join(root, "package.json")
         try:

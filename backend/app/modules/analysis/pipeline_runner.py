@@ -135,7 +135,7 @@ async def run_analysis_pipeline(db: AsyncSession, gateway: RealtimeGateway, anal
             if definition["number"] == 4:
                 language = project.language or "Unknown"
                 command = await detect_build_command(work_root, language)
-                result = await run_sandbox(work_root, command)
+                result = await run_sandbox(work_root, command, language)
 
                 if result.code != 0:
                     await record_error(
@@ -151,7 +151,7 @@ async def run_analysis_pipeline(db: AsyncSession, gateway: RealtimeGateway, anal
             if definition["number"] == 5:
                 language = project.language or "Unknown"
                 command = await detect_test_command(work_root, language)
-                result = await run_sandbox(work_root, command)
+                result = await run_sandbox(work_root, command, language)
                 summary = parse_generic_test_output(result.stdout, result.stderr, result.code)
 
                 db.add(TestRun(

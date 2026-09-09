@@ -12,6 +12,7 @@ import time
 from dataclasses import dataclass
 
 from app.modules.sandbox.resource_limits import sandbox_limits
+from app.modules.sandbox.sandbox_images import image_for_language
 
 
 @dataclass
@@ -22,7 +23,8 @@ class CommandResult:
     duration_ms: int
 
 
-async def execute_in_docker(workspace: str, command: str) -> CommandResult:
+async def execute_in_docker(workspace: str, command: str, language: str | None = None) -> CommandResult:
+    image = image_for_language(language)
     args = [
         "docker", "run", "--rm",
         "--network", sandbox_limits.network,
@@ -34,7 +36,7 @@ async def execute_in_docker(workspace: str, command: str) -> CommandResult:
         "--user", "10001:10001",
         "-v", f"{workspace}:/workspace:rw",
         "-w", "/workspace",
-        "node:22-bookworm-slim",
+        image,
         "/bin/sh", "-lc", command,
     ]
 
