@@ -941,6 +941,7 @@ export const DashboardView: React.FC = () => {
         onClose={handleClosePhaseInspector}
         projectName={projectName}
         contextDocs={contextDocs}
+        analysisId={analysisId}
         onRerunSecurityChecks={handleRerunSecurityChecks}
       />
     </div>

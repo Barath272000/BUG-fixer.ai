@@ -25,8 +25,10 @@ import {
   X,
   XCircle
 } from 'lucide-react';
-import React, { useState } from 'react';
-import { ContextDoc, PipelinePhase } from '../types';
+import React, { useEffect, useState } from 'react';
+import { ContextDoc, LogLine, PipelinePhase } from '../types';
+import { fetchAnalysisLogs } from '../api/analysis';
+import { ApiError } from '../api/client';
 
 interface PhaseInspectorModalProps {
   phase: PipelinePhase | null;
@@ -34,6 +36,7 @@ interface PhaseInspectorModalProps {
   onClose: () => void;
   projectName: string;
   contextDocs: ContextDoc[];
+  analysisId?: string | null;
   onRerunSecurityChecks?: () => void;
   onRerunValidation?: (simulateFail?: boolean) => void;
 }
@@ -44,6 +47,7 @@ export const PhaseInspectorModal: React.FC<PhaseInspectorModalProps> = ({
   onClose,
   projectName,
   contextDocs,
+  analysisId,
   onRerunSecurityChecks,
   onRerunValidation
 }) => {
@@ -53,7 +57,54 @@ export const PhaseInspectorModal: React.FC<PhaseInspectorModalProps> = ({
   const [simulatedValidationState, setSimulatedValidationState] = useState<'idle' | 'running' | 'passed' | 'failed' | 're_analyzing'>('passed');
   const [validationCycle, setValidationCycle] = useState(1);
 
+  // Real Terminal / Raw Logs state — fetched from the backend instead of the
+  // old hardcoded fake log strings.
+  const [rawLogs, setRawLogs] = useState<LogLine[]>([]);
+  const [logsLoading, setLogsLoading] = useState(false);
+  const [logsError, setLogsError] = useState<string | null>(null);
+
+  const phaseIsRunning = phase?.status === 'running';
+
+  useEffect(() => {
+    if (!isOpen || !phase || activeTab !== 'raw-logs' || !analysisId) return;
+
+    let cancelled = false;
+
+    const load = (showSpinner: boolean) => {
+      if (showSpinner) setLogsLoading(true);
+      fetchAnalysisLogs(analysisId, phase.id)
+        .then((result) => {
+          if (!cancelled) {
+            setRawLogs(result);
+            setLogsError(null);
+          }
+        })
+        .catch((err) => {
+          if (!cancelled) setLogsError(err instanceof ApiError ? err.message : 'Could not load logs.');
+        })
+        .finally(() => {
+          if (!cancelled && showSpinner) setLogsLoading(false);
+        });
+    };
+
+    load(true);
+
+    // While this phase is still running, poll so the tab keeps ticking with
+    // real log lines instead of requiring the user to reopen the modal.
+    const intervalId = phaseIsRunning ? window.setInterval(() => load(false), 2000) : null;
+
+    return () => {
+      cancelled = true;
+      if (intervalId) window.clearInterval(intervalId);
+    };
+  }, [isOpen, phase?.id, activeTab, analysisId, phaseIsRunning]);
+
   if (!isOpen || !phase) return null;
+
+  const displayedLogsCount = rawLogs.length;
+  const formattedLogText = rawLogs
+    .map((log) => `[${new Date(log.timestamp).toISOString().replace('T', ' ').replace('Z', '')}] [${log.level}] [${log.category}] ${log.message}`)
+    .join('\n');
 
   const handleCopyLogs = (text: string) => {
     navigator.clipboard.writeText(text);
@@ -561,33 +612,54 @@ export const PhaseInspectorModal: React.FC<PhaseInspectorModalProps> = ({
             <div className="space-y-3">
               <div className="flex items-center justify-between">
                 <span className="text-[11px] font-mono text-gray-400">
-                  sandbox@container:/var/log/{phase.name.toLowerCase().replace(/\s+/g, '_')}.log
+                  {projectName} · {phase.name} · {displayedLogsCount} log line{displayedLogsCount === 1 ? '' : 's'}
+                  {phase.id === 1 && contextDocs.length > 0 && (
+                    <span className="text-gray-600"> · {contextDocs.length} context doc{contextDocs.length === 1 ? '' : 's'} bound</span>
+                  )}
+                  {phaseIsRunning && <span className="ml-2 text-indigo-400">● live</span>}
                 </span>
                 <button
                   type="button"
-                  onClick={() => handleCopyLogs(`[2026-08-19 10:31:04.120] [INFO] Initialized ${phase.name} for ${projectName}...`)}
-                  className="px-2.5 py-1 rounded bg-[#21262D] hover:bg-[#30363D] text-[11px] font-mono text-gray-300 flex items-center gap-1 cursor-pointer transition-colors"
+                  onClick={() => handleCopyLogs(formattedLogText)}
+                  disabled={rawLogs.length === 0}
+                  className="px-2.5 py-1 rounded bg-[#21262D] hover:bg-[#30363D] disabled:opacity-40 disabled:cursor-not-allowed text-[11px] font-mono text-gray-300 flex items-center gap-1 cursor-pointer transition-colors"
                 >
                   <Copy className="w-3 h-3 text-indigo-400" />
                   <span>{copied ? 'Copied!' : 'Copy Raw Output'}</span>
                 </button>
               </div>
 
-              <pre className="p-4 rounded-lg bg-[#0B0E14] border border-[#30363D] font-mono text-[11px] text-gray-300 whitespace-pre-wrap leading-relaxed overflow-x-auto max-h-72">
-{phase.id === 1 ? `[2026-08-19 10:31:04.120] [INFO] [input-validator] Validating project ZIP archive: fastapi-gateway-v1.4.zip (4.8MB)...
-[2026-08-19 10:31:04.135] [PASS] [magic-bytes] Magic byte header verified: PK\\x03\\x04 (PKZIP format 2.0).
-[2026-08-19 10:31:04.148] [PASS] [size-check] File size: 4,821,392 bytes (under 500MB quota limit).
-[2026-08-19 10:31:04.155] [PASS] [decompression-guard] Zip bomb inspection passed. Total uncompressed quota: 11,560,910 bytes (safe).
-[2026-08-19 10:31:04.162] [PASS] [malicious-scan] Scanned 34 archive entries for malicious binaries (.exe, .dll, .so, .bin). 0 found.
-[2026-08-19 10:31:04.170] [INFO] [sanitizer] Purged OS hidden files: .DS_Store, Thumbs.db, desktop.ini.
-[2026-08-19 10:31:04.178] [PASS] [zip-slip-guard] Verified all canonical file paths against sandbox root. 0 path traversal attempts detected.
-[2026-08-19 10:31:04.190] [PASS] [checksum] Computed SHA-256: 7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069
-[2026-08-19 10:31:04.210] [PASS] [context-binding] Bound ${contextDocs.length} context documents (${contextDocs.map(d => d.name).join(', ') || 'standard'}) into reasoning graph.
-[2026-08-19 10:31:04.225] [STATUS] Phase 1 [Project Input] completed with 0 errors, 0 security warnings in 0.8s.` : `[2026-08-19 10:31:05.000] [INFO] [phase-${phase.id}] Initialized ${phase.name} for ${projectName}
-[2026-08-19 10:31:05.200] [INFO] [engine] Executing phase sub-processes...
-[2026-08-19 10:31:05.400] [PASS] [engine] Sub-processes validated: 100% completed
-[2026-08-19 10:31:05.800] [PASS] [telemetry] Metric payload synchronized with dashboard.`}
-              </pre>
+              {logsLoading ? (
+                <div className="p-4 rounded-lg bg-[#0B0E14] border border-[#30363D] text-xs text-gray-400 text-center">
+                  Loading logs…
+                </div>
+              ) : logsError ? (
+                <div className="p-4 rounded-lg bg-rose-950/20 border border-rose-500/30 text-xs text-rose-400 text-center">
+                  {logsError}
+                </div>
+              ) : rawLogs.length === 0 ? (
+                <div className="p-4 rounded-lg bg-[#161B22] border border-[#30363D] text-xs text-gray-400 text-center">
+                  No log output yet for this phase — it appears here once the pipeline starts running it.
+                </div>
+              ) : (
+                <pre className="p-4 rounded-lg bg-[#0B0E14] border border-[#30363D] font-mono text-[11px] whitespace-pre-wrap leading-relaxed overflow-x-auto max-h-72">
+                  {rawLogs.map((log) => {
+                    const levelColor =
+                      log.level === 'ERROR' ? 'text-rose-400' :
+                      log.level === 'WARN' ? 'text-amber-400' :
+                      log.level === 'PASS' ? 'text-emerald-400' :
+                      'text-indigo-300';
+                    return (
+                      <div key={log.id} className="text-gray-300">
+                        <span className="text-gray-500">[{new Date(log.timestamp).toISOString().replace('T', ' ').replace('Z', '')}]</span>{' '}
+                        <span className={levelColor}>[{log.level}]</span>{' '}
+                        <span className="text-gray-400">[{log.category}]</span>{' '}
+                        {log.message}
+                      </div>
+                    );
+                  })}
+                </pre>
+              )}
             </div>
           )}
 

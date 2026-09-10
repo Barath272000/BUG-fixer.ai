@@ -60,3 +60,14 @@ class RecentAnalysisStats(BaseModel):
 class RecentAnalysisResponse(BaseModel):
     items: list[RecentAnalysisItem]
     stats: RecentAnalysisStats
+
+
+class PipelineLogOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    phaseId: str | None
+    timestamp: datetime
+    level: str
+    category: str
+    message: str

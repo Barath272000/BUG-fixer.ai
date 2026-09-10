@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.common.errors.app_error import AppError
-from app.models.analysis import AnalysisRun, PipelinePhase
+from app.models.analysis import AnalysisRun, PipelineLog, PipelinePhase
 from app.models.bug import Bug
 from app.models.enums import AnalysisStatus, BugStatus, ProjectStatus
 from app.models.project import Project
@@ -67,6 +67,38 @@ async def get_analysis(db: AsyncSession, owner_id: str, analysis_id: str) -> Ana
     if run is None:
         raise AppError(404, "ANALYSIS_NOT_FOUND", "Analysis run was not found")
     return run
+
+
+async def list_logs(
+    db: AsyncSession,
+    owner_id: str,
+    analysis_id: str,
+    phase_number: int | None = None,
+    limit: int = 1000,
+) -> list[PipelineLog]:
+    """Real log lines for the Inspector modal's Terminal / Raw Logs tab.
+
+    Reuses get_analysis's ownership join (raises 404 if the run doesn't exist
+    or doesn't belong to owner_id) instead of duplicating that check here.
+    `phase_number` is the 1-8 phase number the frontend already works with
+    (PipelinePhase.number), not the phase's internal uuid — we resolve it to
+    the uuid ourselves since PipelineLog.phaseId stores the uuid.
+    """
+    await get_analysis(db, owner_id, analysis_id)
+
+    stmt = select(PipelineLog).where(PipelineLog.analysisRunId == analysis_id)
+
+    if phase_number is not None:
+        phase_stmt = select(PipelinePhase.id).where(
+            PipelinePhase.analysisRunId == analysis_id, PipelinePhase.number == phase_number
+        )
+        phase_id = (await db.execute(phase_stmt)).scalar_one_or_none()
+        if phase_id is None:
+            return []
+        stmt = stmt.where(PipelineLog.phaseId == phase_id)
+
+    stmt = stmt.order_by(PipelineLog.timestamp.asc()).limit(limit)
+    return (await db.execute(stmt)).scalars().all()
 
 
 async def list_analyses(db: AsyncSession, owner_id: str, project_id: str) -> list[AnalysisRun]:
