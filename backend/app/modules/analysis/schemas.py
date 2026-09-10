@@ -16,6 +16,8 @@ class PhaseOut(BaseModel):
     validationStatus: str
     startedAt: datetime | None
     completedAt: datetime | None
+    subprocesses: list[dict] | None = None
+    validationReport: dict | None = None
 
 
 class AnalysisRunOut(BaseModel):

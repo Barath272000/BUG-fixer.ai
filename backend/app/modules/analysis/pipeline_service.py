@@ -55,6 +55,64 @@ async def set_phase(
     return phase
 
 
+async def set_subprocesses(
+    db: AsyncSession,
+    gateway: RealtimeGateway,
+    analysis_id: str,
+    project_id: str,
+    phase: PipelinePhase,
+    subprocesses: list[dict],
+) -> PipelinePhase:
+    """Persist the real sub-process checklist for a phase and broadcast the tick
+    update live, so the modal's Sub-Processes tab reflects actual progress
+    instead of a hardcoded fallback list.
+
+    `subprocesses` is a list of dicts shaped like the frontend's
+    PhaseSubprocess type: {id, name, completed, status, category?, metrics?}
+    """
+    phase.subprocesses = subprocesses
+    await db.commit()
+    await db.refresh(phase)
+
+    await gateway.publish(
+        project_id,
+        {
+            "type": REALTIME_EVENTS["subprocess_updated"],
+            "projectId": project_id,
+            "analysisId": analysis_id,
+            "payload": {"number": phase.number, "subprocesses": subprocesses},
+        },
+    )
+    return phase
+
+
+async def set_security_report(
+    db: AsyncSession,
+    gateway: RealtimeGateway,
+    analysis_id: str,
+    project_id: str,
+    phase: PipelinePhase,
+    security_checks: list[dict],
+) -> PipelinePhase:
+    """Persist the real Phase 1 security-check results (validationReport is a
+    generic JSON column also used for the Phase 8 audit report — this reuses
+    it under a 'securityChecks' key rather than requiring a migration)."""
+    phase.validationReport = {**(phase.validationReport or {}), "securityChecks": security_checks}
+    await db.commit()
+    await db.refresh(phase)
+
+    await gateway.publish(
+        project_id,
+        {
+            "type": REALTIME_EVENTS["security_updated"],
+            "projectId": project_id,
+            "analysisId": analysis_id,
+            "payload": {"number": phase.number, "securityChecks": security_checks},
+        },
+    )
+    return phase
+
+
 async def add_log(
     db: AsyncSession,
     gateway: RealtimeGateway,

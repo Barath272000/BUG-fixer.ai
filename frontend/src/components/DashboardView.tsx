@@ -23,7 +23,9 @@ const pendingPipelinePhases: PipelinePhase[] = initialPipelinePhases.map((p) => 
   ...p,
   status: 'pending',
   duration: undefined,
-  subprocesses: p.subprocesses?.map((sp) => ({ ...sp, completed: false, status: 'pending' })),
+  // Real subprocess checklists come from the backend via the 'phase.subprocess'
+  // websocket event as each phase actually runs — no fake placeholder here.
+  subprocesses: undefined,
 }));
 
 interface BackendPhase {
@@ -212,6 +214,18 @@ export const DashboardView: React.FC = () => {
           duration: phase.durationMs ? `${(phase.durationMs / 1000).toFixed(1)}s` : p.duration,
         } : p));
         setProgress(Math.round((phase.number / pendingPipelinePhases.length) * 100));
+      } else if (data.type === 'phase.subprocess') {
+        const payload = data.payload as { number: number; subprocesses: PipelinePhase['subprocesses'] };
+        setPhases(prev => prev.map(p => p.id === payload.number ? {
+          ...p,
+          subprocesses: payload.subprocesses,
+        } : p));
+      } else if (data.type === 'phase.security') {
+        const payload = data.payload as { number: number; securityChecks: NonNullable<PipelinePhase['validationReport']>['securityChecks'] };
+        setPhases(prev => prev.map(p => p.id === payload.number ? {
+          ...p,
+          validationReport: { ...p.validationReport, securityChecks: payload.securityChecks },
+        } : p));
       } else if (data.type === 'log.created') {
         const log = data.payload as { id: string; timestamp: string; level: string; category: string; message: string };
         setLogs(prev => [...prev, {

@@ -65,6 +65,14 @@ export interface PhaseSubprocess {
   metrics?: Record<string, string>;
 }
 
+export interface SecurityCheck {
+  id: string;
+  title: string;
+  description: string;
+  status: 'passed' | 'failed' | 'warning' | 'info';
+  metrics: Record<string, string>;
+}
+
 export interface PipelinePhase {
   id: number;
   name: string;
@@ -75,16 +83,17 @@ export interface PipelinePhase {
   subprocesses?: PhaseSubprocess[];
   validationStatus?: 'idle' | 'running' | 'passed' | 'failed' | 're_analyzing';
   validationReport?: {
-    testPassRate: string;
-    totalTests: number;
-    passedTests: number;
-    failedTests: number;
-    regressionFound: boolean;
-    recommendation: string;
-    summary: string;
+    testPassRate?: string;
+    totalTests?: number;
+    passedTests?: number;
+    failedTests?: number;
+    regressionFound?: boolean;
+    recommendation?: string;
+    summary?: string;
     diffSnippet?: string;
     timestamp?: string;
     cycleCount?: number;
+    securityChecks?: SecurityCheck[];
   };
 }
 

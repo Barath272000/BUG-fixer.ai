@@ -33,17 +33,42 @@ from app.models.fix import TestRun
 from app.models.project import Project
 from app.modules.analysis.detectors import detect_build_command, detect_test_command
 from app.modules.analysis.phase_manager import PIPELINE_DEFINITIONS
-from app.modules.analysis.pipeline_service import add_log
+from app.modules.analysis.pipeline_service import add_log, set_security_report, set_subprocesses
 from app.modules.code_analysis.project_inspector import inspect_project
 from app.modules.bugs.service import create_bug_from_error
 from app.modules.errors.error_collector import record_error
 from app.modules.errors.test_result_parser import parse_generic_test_output
 from app.modules.sandbox.sandbox_service import run_sandbox
+from app.modules.uploads.security_scanner import run_security_scan
 from app.modules.uploads.zip_extractor import extract_archive
+from app.models.context import ContextDocument
 
 
 class PipelineError(Exception):
     pass
+
+
+def _zip_phase1_subprocesses() -> list[dict]:
+    """Real steps for a local ZIP/TAR upload. Step 0 is already true by the
+    time the pipeline reaches Phase 1 — validate_archive() + checksum ran
+    during the upload request itself (uploads/service.py)."""
+    return [
+        {"id": "source_received", "name": "Archive integrity & quota verified", "completed": True, "status": "completed", "category": "upload"},
+        {"id": "extract_workspace", "name": "Extract archive into sandbox workspace", "completed": False, "status": "pending", "category": "extract"},
+        {"id": "workspace_ready", "name": "Workspace ready for inspection", "completed": False, "status": "pending", "category": "extract"},
+    ]
+
+
+def _github_phase1_subprocesses() -> list[dict]:
+    """Real steps for a GitHub-sourced project. None of these are implemented
+    in the pipeline yet (see HONEST GAP note above) — shown as a checklist so
+    the modal reflects the truth instead of faking progress."""
+    return [
+        {"id": "token_verified", "name": "GitHub connector authorization verified", "completed": False, "status": "pending", "category": "github"},
+        {"id": "repo_resolved", "name": "Repository & branch resolved", "completed": False, "status": "pending", "category": "github"},
+        {"id": "clone_repo", "name": "Clone repository into workspace", "completed": False, "status": "pending", "category": "github"},
+        {"id": "workspace_ready", "name": "Workspace ready for inspection", "completed": False, "status": "pending", "category": "github"},
+    ]
 
 
 async def _set_phase_status(db: AsyncSession, phase: PipelinePhase, status: PhaseStatus) -> None:
@@ -106,13 +131,27 @@ async def run_analysis_pipeline(db: AsyncSession, gateway: RealtimeGateway, anal
             # Phase 1: extract/clone project source
             if definition["number"] == 1:
                 if project.sourceType == SourceType.GITHUB:
+                    subprocesses = _github_phase1_subprocesses()
+                    # First real step (repo cloning) is the honest failure point —
+                    # nothing before it actually runs yet either, so we don't
+                    # fake a tick on token/repo resolution.
+                    subprocesses[2]["status"] = "failed"
+                    subprocesses[2]["metrics"] = {"reason": "Not yet implemented in this build"}
+                    await set_subprocesses(db, gateway, analysis_id, project_id, phase, subprocesses)
                     raise PipelineError(
                         "GitHub-sourced projects aren't supported yet in this build — "
                         "the GitHub integration module hasn't been ported. Upload a ZIP instead."
                     )
                 if not project.sourcePath:
                     raise PipelineError("Project source archive is missing")
+
+                subprocesses = _zip_phase1_subprocesses()
+                await set_subprocesses(db, gateway, analysis_id, project_id, phase, subprocesses)
+
                 await extract_archive(project.sourcePath, work_root)
+                subprocesses[1]["completed"] = True
+                subprocesses[1]["status"] = "completed"
+                await set_subprocesses(db, gateway, analysis_id, project_id, phase, subprocesses)
 
                 project.workspacePath = work_root
                 ws_stmt = select(Workspace).where(Workspace.projectId == project_id)
@@ -122,6 +161,22 @@ async def run_analysis_pipeline(db: AsyncSession, gateway: RealtimeGateway, anal
                 else:
                     db.add(Workspace(projectId=project_id, rootPath=work_root))
                 await db.commit()
+
+                subprocesses[2]["completed"] = True
+                subprocesses[2]["status"] = "completed"
+                await set_subprocesses(db, gateway, analysis_id, project_id, phase, subprocesses)
+
+                # Real Phase 1 security-check results (size/zip-bomb, malicious/junk
+                # files, path traversal, magic-bytes/checksum, context docs) —
+                # surfaced to the Inspector modal's Security & Sanitization tab.
+                ext = os.path.splitext(project.sourcePath)[1].lower()
+                archive_type = "zip" if ext == ".zip" else "tar"
+                ctx_docs_stmt = select(ContextDocument.id).where(ContextDocument.projectId == project_id)
+                context_doc_count = len((await db.execute(ctx_docs_stmt)).scalars().all())
+                security_checks = await run_security_scan(
+                    project.sourcePath, work_root, archive_type, context_doc_count
+                )
+                await set_security_report(db, gateway, analysis_id, project_id, phase, security_checks)
 
             # Phase 2: detect language/framework
             if definition["number"] == 2:

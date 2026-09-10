@@ -104,71 +104,33 @@ export const PhaseInspectorModal: React.FC<PhaseInspectorModalProps> = ({
     }
   };
 
-  // Phase 1 Security Deep Dive Checks
-  const projectInputSecurityChecks = [
-    {
-      id: 'check-size',
-      title: 'Archive Size & Compression Quota Check',
-      description: 'Validates raw archive file size and guards against decompression zip bomb memory exhaustion.',
-      status: 'passed',
-      metrics: {
-        'Archive Size': '4.82 MB',
-        'Quota Limit': '500.00 MB max',
-        'Uncompressed Size': '11.56 MB (2.4x ratio)',
-        'Zip Bomb Guard': 'Active (2.0 GB hard limit threshold)'
-      },
-      icon: <HardDrive className="w-4 h-4 text-emerald-400" />
-    },
-    {
-      id: 'check-malicious',
-      title: 'Malicious File & Binary Quarantine Scanner',
-      description: 'Deep file tree inspection to quarantine dangerous binaries, strip hidden OS artifacts, and flag autoruns.',
-      status: 'passed',
-      metrics: {
-        'Files Scanned': '34 source files',
-        'Binaries (.exe/.dll/.so)': '0 detected (Clean)',
-        'OS Artifacts Stripped': '.DS_Store, Thumbs.db purged',
-        'Shell Scripts (.sh)': 'Quarantined & verified safe'
-      },
-      icon: <ShieldCheck className="w-4 h-4 text-emerald-400" />
-    },
-    {
-      id: 'check-traversal',
-      title: 'Path Traversal & Zip Slip Exploit Prevention',
-      description: 'Canonical path resolution verifying all archive target destinations cannot break out of sandbox root.',
-      status: 'passed',
-      metrics: {
-        'Relative Path Traversal (../)': '0 exploits detected',
-        'Symlink Dereferencing': 'Restricted to root directory',
-        'Canonical Path Bound': '/sandbox/workspace/app/'
-      },
-      icon: <Lock className="w-4 h-4 text-emerald-400" />
-    },
-    {
-      id: 'check-integrity',
-      title: 'MIME Type Magic Byte & SHA-256 Integrity Verification',
-      description: 'Checks file header magic bytes (PK\\x03\\x04) and computes cryptographic checksum.',
-      status: 'passed',
-      metrics: {
-        'Magic Bytes': 'PK\\x03\\x04 (Valid PKZIP 2.0)',
-        'MIME Type': 'application/zip (Verified)',
-        'SHA-256': '7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069'
-      },
-      icon: <Shield className="w-4 h-4 text-emerald-400" />
-    },
-    {
-      id: 'check-context',
-      title: 'Context Documentation & API Contract Ingestion',
-      description: 'Parses supplementary OpenAPI specs and architecture guidelines for AI reasoning grounding.',
-      status: contextDocs.length > 0 ? 'passed' : 'info',
-      metrics: {
-        'Attached Context Docs': `${contextDocs.length} document(s) bound`,
-        'Active Docs': contextDocs.map(d => `${d.name} (${d.size})`).join(', ') || 'None attached (Default rules)',
-        'AST Contract Grounding': 'Enabled'
-      },
-      icon: <FileText className="w-4 h-4 text-indigo-400" />
+  // Phase 1 Security Deep Dive Checks — real results from this run's backend scan,
+  // or empty until the pipeline has actually run Phase 1.
+  const projectInputSecurityChecks = phase.validationReport?.securityChecks ?? [];
+
+  const checkIcon = (id: string) => {
+    switch (id) {
+      case 'check-size': return <HardDrive className="w-4 h-4 text-emerald-400" />;
+      case 'check-malicious': return <ShieldCheck className="w-4 h-4 text-emerald-400" />;
+      case 'check-traversal': return <Lock className="w-4 h-4 text-emerald-400" />;
+      case 'check-integrity': return <Shield className="w-4 h-4 text-emerald-400" />;
+      case 'check-context': return <FileText className="w-4 h-4 text-indigo-400" />;
+      default: return <Shield className="w-4 h-4 text-gray-400" />;
     }
-  ];
+  };
+
+  const statusBadge = (status: string) => {
+    switch (status) {
+      case 'passed':
+        return <span className="text-[10px] font-mono font-semibold px-2 py-0.5 rounded bg-green-500/10 text-green-400 border border-green-500/20 flex items-center gap-1"><CheckCircle2 className="w-3 h-3" /><span>PASSED</span></span>;
+      case 'failed':
+        return <span className="text-[10px] font-mono font-semibold px-2 py-0.5 rounded bg-rose-500/10 text-rose-400 border border-rose-500/20 flex items-center gap-1"><XCircle className="w-3 h-3" /><span>FAILED</span></span>;
+      case 'warning':
+        return <span className="text-[10px] font-mono font-semibold px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/20 flex items-center gap-1"><span>WARNING</span></span>;
+      default:
+        return <span className="text-[10px] font-mono font-semibold px-2 py-0.5 rounded bg-gray-700/40 text-gray-300 border border-gray-600/40 flex items-center gap-1"><span>INFO</span></span>;
+    }
+  };
 
   return (
     <div 
@@ -293,7 +255,7 @@ export const PhaseInspectorModal: React.FC<PhaseInspectorModalProps> = ({
             }`}
           >
             <Layers className="w-3.5 h-3.5" />
-            <span>Sub-Processes ({phase.subtasks?.length || 4})</span>
+            <span>Sub-Processes ({phase.subprocesses?.length ?? 0})</span>
           </button>
 
           <button
@@ -335,54 +297,71 @@ export const PhaseInspectorModal: React.FC<PhaseInspectorModalProps> = ({
               {/* PHASE 1: Project Input Specialized View */}
               {phase.id === 1 && (
                 <>
-                  <div className="p-3.5 rounded-lg bg-emerald-950/20 border border-emerald-500/30 flex items-start gap-3">
-                    <ShieldCheck className="w-5 h-5 text-emerald-400 shrink-0 mt-0.5" />
-                    <div>
-                      <div className="text-xs font-bold text-emerald-300">
-                        Zero-Trust Security & Input Validation Pipeline: 100% Passed
-                      </div>
-                      <p className="text-[11px] text-emerald-400/80 mt-0.5">
-                        Archive input for <span className="font-mono font-semibold">{projectName}</span> passed all size limits, anti-malware scans, and path traversal defenses before entering the isolated container environment.
-                      </p>
-                    </div>
-                  </div>
-
-                  <div className="space-y-2.5">
-                    {projectInputSecurityChecks.map((check) => (
-                      <div 
-                        key={check.id}
-                        className="rounded-lg bg-[#161B22] border border-[#30363D] p-3.5 space-y-2 hover:border-indigo-500/40 transition-colors"
-                      >
-                        <div className="flex items-center justify-between">
-                          <div className="flex items-center gap-2.5">
-                            <div className="p-1 rounded bg-[#0D1117] border border-[#30363D]">
-                              {check.icon}
+                  {projectInputSecurityChecks.length > 0 ? (
+                    <>
+                      {(() => {
+                        const hasFailed = projectInputSecurityChecks.some(c => c.status === 'failed');
+                        const hasWarning = projectInputSecurityChecks.some(c => c.status === 'warning');
+                        const passedCount = projectInputSecurityChecks.filter(c => c.status === 'passed').length;
+                        const banner = hasFailed
+                          ? { wrap: 'p-3.5 rounded-lg bg-rose-950/20 border border-rose-500/30 flex items-start gap-3', icon: 'w-5 h-5 text-rose-400 shrink-0 mt-0.5', title: 'text-xs font-bold text-rose-300', body: 'text-[11px] text-rose-400/80 mt-0.5' }
+                          : hasWarning
+                          ? { wrap: 'p-3.5 rounded-lg bg-amber-950/20 border border-amber-500/30 flex items-start gap-3', icon: 'w-5 h-5 text-amber-400 shrink-0 mt-0.5', title: 'text-xs font-bold text-amber-300', body: 'text-[11px] text-amber-400/80 mt-0.5' }
+                          : { wrap: 'p-3.5 rounded-lg bg-emerald-950/20 border border-emerald-500/30 flex items-start gap-3', icon: 'w-5 h-5 text-emerald-400 shrink-0 mt-0.5', title: 'text-xs font-bold text-emerald-300', body: 'text-[11px] text-emerald-400/80 mt-0.5' };
+                        return (
+                          <div className={banner.wrap}>
+                            <ShieldCheck className={banner.icon} />
+                            <div>
+                              <div className={banner.title}>
+                                Zero-Trust Security & Input Validation Pipeline: {passedCount}/{projectInputSecurityChecks.length} Passed
+                              </div>
+                              <p className={banner.body}>
+                                Archive input for <span className="font-mono font-semibold">{projectName}</span> was checked against size limits, extension-based binary scanning, and path traversal defenses before entering the isolated container environment.
+                              </p>
                             </div>
-                            <span className="text-xs font-bold text-gray-200 font-mono">
-                              {check.title}
-                            </span>
                           </div>
-                          <span className="text-[10px] font-mono font-semibold px-2 py-0.5 rounded bg-green-500/10 text-green-400 border border-green-500/20 flex items-center gap-1">
-                            <CheckCircle2 className="w-3 h-3 text-green-400" />
-                            <span>PASSED</span>
-                          </span>
-                        </div>
+                        );
+                      })()}
 
-                        <p className="text-[11px] text-gray-400 leading-relaxed">
-                          {check.description}
-                        </p>
-
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1 border-t border-[#30363D]/60 text-[11px] font-mono">
-                          {Object.entries(check.metrics).map(([key, val]) => (
-                            <div key={key} className="flex items-center justify-between p-1.5 rounded bg-[#0D1117] border border-[#30363D]/40">
-                              <span className="text-gray-500">{key}:</span>
-                              <span className="text-gray-300 font-semibold truncate ml-2">{val}</span>
+                      <div className="space-y-2.5">
+                        {projectInputSecurityChecks.map((check) => (
+                          <div
+                            key={check.id}
+                            className="rounded-lg bg-[#161B22] border border-[#30363D] p-3.5 space-y-2 hover:border-indigo-500/40 transition-colors"
+                          >
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-2.5">
+                                <div className="p-1 rounded bg-[#0D1117] border border-[#30363D]">
+                                  {checkIcon(check.id)}
+                                </div>
+                                <span className="text-xs font-bold text-gray-200 font-mono">
+                                  {check.title}
+                                </span>
+                              </div>
+                              {statusBadge(check.status)}
                             </div>
-                          ))}
-                        </div>
+
+                            <p className="text-[11px] text-gray-400 leading-relaxed">
+                              {check.description}
+                            </p>
+
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1 border-t border-[#30363D]/60 text-[11px] font-mono">
+                              {Object.entries(check.metrics).map(([key, val]) => (
+                                <div key={key} className="flex items-center justify-between p-1.5 rounded bg-[#0D1117] border border-[#30363D]/40">
+                                  <span className="text-gray-500">{key}:</span>
+                                  <span className="text-gray-300 font-semibold truncate ml-2">{val}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
                       </div>
-                    ))}
-                  </div>
+                    </>
+                  ) : (
+                    <div className="p-4 rounded-lg bg-[#161B22] border border-[#30363D] text-xs text-gray-400 text-center">
+                      No security scan results yet for this phase — they appear here once the pipeline actually runs Phase 1 for this analysis.
+                    </div>
+                  )}
                 </>
               )}
 
@@ -518,45 +497,62 @@ export const PhaseInspectorModal: React.FC<PhaseInspectorModalProps> = ({
                   Sub-Processes Under {phase.name}
                 </span>
                 <span className="font-mono text-indigo-300 font-bold">
-                  {phase.subtasks?.length || 4} Total Processes
+                  {phase.subprocesses?.length ?? 0} Total Processes
                 </span>
               </div>
 
-              <div className="space-y-2">
-                {(phase.subtasks || [
-                  { name: 'Initialize runtime context & AST graph', completed: true },
-                  { name: 'Execute deterministic verification', completed: true },
-                  { name: 'Stream diagnostic metrics to live log table', completed: true }
-                ]).map((sub, idx) => (
-                  <div 
-                    key={idx}
-                    className="p-3 rounded-lg bg-[#161B22] border border-[#30363D] flex items-center justify-between text-xs hover:border-indigo-500/40 transition-colors"
-                  >
-                    <div className="flex items-center gap-3">
-                      <div className={`w-5 h-5 rounded flex items-center justify-center font-mono text-[10px] font-bold ${
-                        sub.completed 
-                          ? 'bg-green-950/60 border border-green-500/40 text-green-400' 
-                          : 'bg-[#21262D] border border-[#30363D] text-gray-400'
-                      }`}>
-                        {sub.completed ? <Check className="w-3.5 h-3.5 stroke-[3]" /> : idx + 1}
-                      </div>
-                      <div>
-                        <div className={`font-mono font-medium ${sub.completed ? 'text-gray-200' : 'text-gray-400'}`}>
-                          {sub.name}
+              {phase.subprocesses && phase.subprocesses.length > 0 ? (
+                <div className="space-y-2">
+                  {phase.subprocesses.map((sub, idx) => {
+                    const failed = sub.status === 'failed';
+                    const running = sub.status === 'running';
+                    return (
+                      <div
+                        key={sub.id ?? idx}
+                        className="p-3 rounded-lg bg-[#161B22] border border-[#30363D] flex items-center justify-between text-xs hover:border-indigo-500/40 transition-colors"
+                      >
+                        <div className="flex items-center gap-3">
+                          <div className={`w-5 h-5 rounded flex items-center justify-center font-mono text-[10px] font-bold ${
+                            sub.completed
+                              ? 'bg-green-950/60 border border-green-500/40 text-green-400'
+                              : failed
+                              ? 'bg-rose-950/60 border border-rose-500/40 text-rose-400'
+                              : 'bg-[#21262D] border border-[#30363D] text-gray-400'
+                          }`}>
+                            {sub.completed ? <Check className="w-3.5 h-3.5 stroke-[3]" /> : failed ? <X className="w-3.5 h-3.5 stroke-[3]" /> : idx + 1}
+                          </div>
+                          <div>
+                            <div className={`font-mono font-medium ${sub.completed ? 'text-gray-200' : 'text-gray-400'}`}>
+                              {sub.name}
+                            </div>
+                            {sub.metrics && Object.entries(sub.metrics).length > 0 && (
+                              <div className="text-[10px] text-gray-500 mt-0.5">
+                                {Object.entries(sub.metrics).map(([k, v]) => `${k}: ${v}`).join(' · ')}
+                              </div>
+                            )}
+                          </div>
                         </div>
-                      </div>
-                    </div>
 
-                    <span className={`text-[10px] font-mono font-semibold px-2 py-0.5 rounded uppercase ${
-                      sub.completed 
-                        ? 'bg-green-500/10 text-green-400 border border-green-500/20' 
-                        : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
-                    }`}>
-                      {sub.completed ? 'COMPLETED' : 'IN PROGRESS'}
-                    </span>
-                  </div>
-                ))}
-              </div>
+                        <span className={`text-[10px] font-mono font-semibold px-2 py-0.5 rounded uppercase ${
+                          sub.completed
+                            ? 'bg-green-500/10 text-green-400 border border-green-500/20'
+                            : failed
+                            ? 'bg-rose-500/10 text-rose-400 border border-rose-500/20'
+                            : running
+                            ? 'bg-indigo-500/10 text-indigo-300 border border-indigo-500/20'
+                            : 'bg-amber-500/10 text-amber-400 border border-amber-500/20'
+                        }`}>
+                          {sub.completed ? 'COMPLETED' : failed ? 'FAILED' : running ? 'RUNNING' : 'PENDING'}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="p-4 rounded-lg bg-[#161B22] border border-[#30363D] text-xs text-gray-400 text-center">
+                  No sub-process data yet for this phase — it appears here once the pipeline starts running it.
+                </div>
+              )}
             </div>
           )}
 
