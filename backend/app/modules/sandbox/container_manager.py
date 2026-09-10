@@ -35,6 +35,7 @@ async def execute_in_docker(workspace: str, command: str, language: str | None =
         "--tmpfs", "/tmp:rw,noexec,nosuid,size=256m",
         "--user", "10001:10001",
         "-e", "PYTHONDONTWRITEBYTECODE=1",
+        "-e", "PYTHONPYCACHEPREFIX=/tmp/pycache",
         "-v", f"{workspace}:/workspace:rw",
         "-w", "/workspace",
         image,
