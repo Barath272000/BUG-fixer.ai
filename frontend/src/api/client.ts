@@ -45,7 +45,7 @@ const API_PREFIX = '/api/v1';
 
 // TODO: replace with the token printed by `npm run seed:dev-user` (backend/prisma/seed-dev-user.ts)
 
-const DEV_TOKEN = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImM3Y2E3ZWJkLTQ3YTQtNGM4Mi04ODE2LTgxMDU1NmRmYzhlZCIsImVtYWlsIjoiZGV2QGV4YW1wbGUuY29tIiwiZGlzcGxheU5hbWUiOiJMb2NhbCBEZXZlbG9wZXIiLCJyb2xlIjoiVVNFUiIsImlhdCI6MTc4OTA0NDAwMywiZXhwIjoxNzg5MDQ3NjAzfQ.2ZfMhlpmi1FR7ZH75yZq66njU_Re6-xD2kpfMQbvAow';
+const DEV_TOKEN = "";
 
 export function getAuthToken(): string {
   return DEV_TOKEN;
