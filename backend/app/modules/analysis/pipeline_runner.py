@@ -48,6 +48,28 @@ class PipelineError(Exception):
     pass
 
 
+def _command_failure_detail(result) -> str:
+    """Combine stdout + stderr into one labeled string for error messages.
+
+    Docker prints image-pull noise ("Unable to find image ... Pulling from
+    library/python ... Status: Downloaded newer image") to stderr on a cold
+    pull, while the actual tool output (e.g. python -m compileall's
+    SyntaxError) goes to stdout. Reading stderr alone shows the Docker noise
+    and hides the real error. This surfaces both, stdout first since that's
+    almost always where the actual failure detail lives.
+    """
+    stdout = (result.stdout or "").strip()
+    stderr = (result.stderr or "").strip()
+    parts = []
+    if stdout:
+        parts.append(f"--- stdout ---\n{stdout}")
+    if stderr:
+        parts.append(f"--- stderr ---\n{stderr}")
+    if not parts:
+        return "(command produced no output)"
+    return "\n".join(parts)
+
+
 def _zip_phase1_subprocesses() -> list[dict]:
     """Real steps for a local ZIP/TAR upload. Step 0 is already true by the
     time the pipeline reaches Phase 1 — validate_archive() + checksum ran
@@ -194,12 +216,15 @@ async def run_analysis_pipeline(db: AsyncSession, gateway: RealtimeGateway, anal
                 result = await run_sandbox(work_root, command, language)
 
                 if result.code != 0:
+                    detail = _command_failure_detail(result)
                     error = await record_error(
                         db, project_id, f"Build command failed: {command}",
-                        analysis_run_id=analysis_id, name="BuildError", stack_trace=result.stderr,
+                        analysis_run_id=analysis_id, name="BuildError", stack_trace=detail,
                     )
                     await create_bug_from_error(db, project, error)
-                    raise PipelineError(f"Build failed: {result.stderr[:2000]}")
+                    await add_log(db, gateway, analysis_id, project_id, "ERROR", "Install & Build",
+                                  f"Build failed: {detail[:4000]}", phase.id)
+                    raise PipelineError(f"Build failed: {detail[:2000]}")
 
                 await add_log(db, gateway, analysis_id, project_id, "PASS", "Install & Build",
                               f"Build succeeded with {command}", phase.id)
@@ -220,11 +245,14 @@ async def run_analysis_pipeline(db: AsyncSession, gateway: RealtimeGateway, anal
                 await db.commit()
 
                 if result.code != 0:
+                    detail = _command_failure_detail(result)
                     error = await record_error(
                         db, project_id, f"Test command failed: {command}",
-                        analysis_run_id=analysis_id, name="TestFailure", stack_trace=result.stderr,
+                        analysis_run_id=analysis_id, name="TestFailure", stack_trace=detail,
                     )
                     await create_bug_from_error(db, project, error)
+                    await add_log(db, gateway, analysis_id, project_id, "ERROR", "Testing",
+                                  f"Tests failed: {detail[:4000]}", phase.id)
 
             await _set_phase_status(db, phase, PhaseStatus.COMPLETED)
             await gateway.publish(
@@ -252,6 +280,13 @@ async def run_analysis_pipeline(db: AsyncSession, gateway: RealtimeGateway, anal
         run.errorMessage = message
         project.status = ProjectStatus.FAILED
         await db.commit()
+
+        try:
+            await add_log(db, gateway, analysis_id, project_id, "ERROR", "Pipeline",
+                          f"Analysis failed: {message[:4000]}")
+        except Exception:  # noqa: BLE001
+            # Never let a logging failure mask the real pipeline error.
+            pass
 
         await gateway.publish(
             project_id,
