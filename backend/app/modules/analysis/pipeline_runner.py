@@ -35,6 +35,7 @@ from app.modules.analysis.detectors import detect_build_command, detect_test_com
 from app.modules.analysis.phase_manager import PIPELINE_DEFINITIONS
 from app.modules.analysis.pipeline_service import add_log
 from app.modules.code_analysis.project_inspector import inspect_project
+from app.modules.bugs.service import create_bug_from_error
 from app.modules.errors.error_collector import record_error
 from app.modules.errors.test_result_parser import parse_generic_test_output
 from app.modules.sandbox.sandbox_service import run_sandbox
@@ -138,10 +139,11 @@ async def run_analysis_pipeline(db: AsyncSession, gateway: RealtimeGateway, anal
                 result = await run_sandbox(work_root, command, language)
 
                 if result.code != 0:
-                    await record_error(
+                    error = await record_error(
                         db, project_id, f"Build command failed: {command}",
                         analysis_run_id=analysis_id, name="BuildError", stack_trace=result.stderr,
                     )
+                    await create_bug_from_error(db, project, error)
                     raise PipelineError(f"Build failed: {result.stderr[:2000]}")
 
                 await add_log(db, gateway, analysis_id, project_id, "PASS", "Install & Build",
@@ -163,10 +165,11 @@ async def run_analysis_pipeline(db: AsyncSession, gateway: RealtimeGateway, anal
                 await db.commit()
 
                 if result.code != 0:
-                    await record_error(
+                    error = await record_error(
                         db, project_id, f"Test command failed: {command}",
                         analysis_run_id=analysis_id, name="TestFailure", stack_trace=result.stderr,
                     )
+                    await create_bug_from_error(db, project, error)
 
             await _set_phase_status(db, phase, PhaseStatus.COMPLETED)
             await gateway.publish(

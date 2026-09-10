@@ -79,7 +79,7 @@ function formatDuration(ms: number): string {
 
 export const DashboardView: React.FC = () => {
   const [activeUploadTab, setActiveUploadTab] = useState<'zip' | 'github' | 'paste'>('zip');
-  const [projectName, setProjectName] = useState('api-gateway');
+  const [projectName, setProjectName] = useState('');
   const [activeRightTab, setActiveRightTab] = useState<'pipeline' | 'logs'>('pipeline');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -137,33 +137,9 @@ export const DashboardView: React.FC = () => {
   const [githubTokenConnected, setGithubTokenConnected] = useState<boolean | null>(null);
   const [githubConnecting, setGithubConnecting] = useState(false);
 
-  // Optional Context Docs State
-  const [contextDocs, setContextDocs] = useState<ContextDoc[]>([
-    {
-      id: 'doc-1',
-      name: 'openapi-spec.yaml',
-      size: '18.4 KB',
-      type: 'openapi',
-      uploadedAt: '10:30 AM',
-      description: 'REST API endpoints & JWT schema specification',
-      content: `openapi: 3.0.3
-info:
-  title: API Gateway Service
-  version: 1.4.0
-paths:
-  /api/v1/auth/user:
-    get:
-      summary: Retrieve authenticated user profile
-      security:
-        - BearerAuth: []
-      responses:
-        '200':
-          description: User object with valid sub claim
-        '401':
-          description: Missing or malformed bearer token`
-    }
-  ]);
-  const [customInstructions, setCustomInstructions] = useState<string>('Enforce strict null checks for JWT tokens; do not mutate existing API contracts.');
+  // Optional Context Docs State — starts empty; the user attaches their own files.
+  const [contextDocs, setContextDocs] = useState<ContextDoc[]>([]);
+  const [customInstructions, setCustomInstructions] = useState<string>('');
   const [selectedPhaseForInspection, setSelectedPhaseForInspection] = useState<PipelinePhase | null>(null);
   const [isPhaseInspectorOpen, setIsPhaseInspectorOpen] = useState<boolean>(false);
 

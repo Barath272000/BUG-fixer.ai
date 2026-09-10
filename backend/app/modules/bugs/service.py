@@ -5,7 +5,7 @@ from sqlalchemy.orm import selectinload
 
 from app.common.errors.app_error import AppError
 from app.common.utils.ids import ensure_valid_id
-from app.models.bug import Bug
+from app.models.bug import Bug, BugOccurrence, ErrorRecord
 from app.models.enums import BugStatus, Severity
 from app.models.fix import FixProposal
 from app.models.project import Project
@@ -113,6 +113,82 @@ async def create_bug(db: AsyncSession, owner_id: str, payload: CreateBugRequest)
     db.add(bug)
     await db.commit()
     await db.refresh(bug)
+    return bug
+
+
+async def create_bug_from_error(db: AsyncSession, project: Project, error: ErrorRecord) -> Bug:
+    """Bridges Phase 6 (Error Collection) to the Bug List / AI diagnosis flow.
+
+    Previously the pipeline only ever wrote to ErrorRecord, and Bug rows
+    could only be created by hand through the "Log Bug" modal in the
+    frontend — so a real build/test failure the pipeline found was never
+    visible in Bug List and could never reach POST /fixes/generate. This
+    dedupes on ErrorRecord.fingerprint: a failure seen again on a later run
+    adds a BugOccurrence to the existing open Bug instead of creating a
+    duplicate one.
+    """
+    existing_stmt = select(Bug).where(
+        Bug.projectId == project.id,
+        Bug.fingerprint == error.fingerprint,
+        Bug.status.in_((BugStatus.Open, BugStatus.InReview, BugStatus.AISuggested)),
+    )
+    bug = (await db.execute(existing_stmt)).scalar_one_or_none()
+
+    if bug is not None:
+        db.add(BugOccurrence(
+            bugId=bug.id,
+            errorId=error.id,
+            lineNumber=error.lineNumber,
+            filePath=error.filePath,
+        ))
+        await db.commit()
+        await db.refresh(bug)
+        return bug
+
+    count = (
+        await db.execute(
+            select(func.count()).select_from(Bug).where(Bug.projectId == project.id)
+        )
+    ).scalar_one()
+    code = f"BUG-{count + 1:03d}"
+
+    # BuildError blocks the whole pipeline so it's Critical; a failing test
+    # (TestFailure) is High but not necessarily blocking. Anything else
+    # (future error sources) defaults to Medium rather than guessing high.
+    severity = {
+        "BuildError": Severity.Critical,
+        "TestFailure": Severity.High,
+    }.get(error.name or "", Severity.Medium)
+
+    title = error.message[:200] if error.message else (error.name or "Unnamed error")
+
+    bug = Bug(
+        projectId=project.id,
+        analysisRunId=error.analysisRunId,
+        code=code,
+        title=title,
+        description=error.stackTrace[:2000] if error.stackTrace else None,
+        tags=[f"#{(error.name or 'error').lower()}", "#auto-detected"],
+        severity=severity,
+        status=BugStatus.Open,
+        language=project.language or "Unknown",
+        component=error.filePath or error.source or "Unknown",
+        filePath=error.filePath,
+        lineNumber=error.lineNumber,
+        stackTrace=error.stackTrace,
+        fingerprint=error.fingerprint,
+    )
+    db.add(bug)
+    await db.commit()
+    await db.refresh(bug)
+
+    db.add(BugOccurrence(
+        bugId=bug.id,
+        errorId=error.id,
+        lineNumber=error.lineNumber,
+        filePath=error.filePath,
+    ))
+    await db.commit()
     return bug
 
 

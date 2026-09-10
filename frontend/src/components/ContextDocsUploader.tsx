@@ -1,7 +1,6 @@
 import {
   AlignLeft,
   BookOpen,
-  Check,
   ChevronDown,
   ChevronUp,
   Eye,
@@ -9,8 +8,6 @@ import {
   FileJson,
   FileSpreadsheet,
   FileText,
-  Plus,
-  Sparkles,
   Trash2,
   Upload,
   X
@@ -26,57 +23,6 @@ interface ContextDocsUploaderProps {
   customInstructions: string;
   onCustomInstructionsChange: (instructions: string) => void;
 }
-
-const PRESET_TEMPLATES: Omit<ContextDoc, 'id' | 'uploadedAt'>[] = [
-  {
-    name: 'openapi-spec.yaml',
-    size: '18.4 KB',
-    type: 'openapi',
-    description: 'REST API endpoints & JWT schema specification',
-    content: `openapi: 3.0.3
-info:
-  title: API Gateway Service
-  version: 1.4.0
-paths:
-  /api/v1/auth/user:
-    get:
-      summary: Retrieve authenticated user profile
-      security:
-        - BearerAuth: []
-      responses:
-        '200':
-          description: User object with valid sub claim
-        '401':
-          description: Missing or malformed bearer token`
-  },
-  {
-    name: 'system-architecture.md',
-    size: '12.1 KB',
-    type: 'markdown',
-    description: 'Microservices architecture & auth flow constraints',
-    content: `# System Architecture Guidelines
-
-## Authentication Pipeline
-1. All client requests pass through the API Gateway.
-2. Tokens are decoded using HMAC SHA-256 with the secret key in \`JWT_SECRET\`.
-3. The \`sub\` claim must be verified for presence before querying user store.
-4. If token is invalid or missing, respond strictly with HTTP 401 and JSON error body.`
-  },
-  {
-    name: 'security-standards.json',
-    size: '8.7 KB',
-    type: 'json',
-    description: 'Zero-trust security rules and defensive coding standards',
-    content: `{
-  "security_level": "Tier-1",
-  "rules": {
-    "null_safety": "mandatory_preflight_checks",
-    "jwt_verification": "reject_unsigned_and_empty_payloads",
-    "redis_cluster": "atomic_lua_scripts_only"
-  }
-}`
-  }
-];
 
 export const ContextDocsUploader: React.FC<ContextDocsUploaderProps> = ({
   docs,
@@ -177,18 +123,6 @@ export const ContextDocsUploader: React.FC<ContextDocsUploaderProps> = ({
     });
   };
 
-  const handleAddPreset = (preset: typeof PRESET_TEMPLATES[0]) => {
-    const existing = docs.find(d => d.name === preset.name);
-    if (existing) return;
-
-    const newDoc: ContextDoc = {
-      ...preset,
-      id: `${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-      uploadedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    };
-    onAddDoc(newDoc);
-  };
-
   return (
     <div id="context-docs-uploader-section" className="rounded-lg bg-[#161B22] border border-[#30363D] p-4 space-y-3 transition-all">
       
@@ -269,39 +203,6 @@ export const ContextDocsUploader: React.FC<ContextDocsUploaderProps> = ({
               <span className="text-gray-400 font-mono">.txt</span>
               <span>·</span>
               <span className="text-gray-400 font-mono">.pdf</span>
-            </div>
-          </div>
-
-          {/* Quick Preset Templates */}
-          <div className="space-y-1.5">
-            <div className="text-[10px] font-semibold uppercase tracking-wider text-gray-400 flex items-center gap-1">
-              <Sparkles className="w-3 h-3 text-indigo-400" />
-              <span>Quick Sample Presets</span>
-            </div>
-            <div className="flex flex-wrap gap-1.5">
-              {PRESET_TEMPLATES.map((preset) => {
-                const isAdded = docs.some(d => d.name === preset.name);
-                return (
-                  <button
-                    key={preset.name}
-                    type="button"
-                    onClick={() => handleAddPreset(preset)}
-                    disabled={isAdded}
-                    className={`px-2 py-1 rounded text-[11px] font-mono flex items-center gap-1.5 border transition-all cursor-pointer ${
-                      isAdded 
-                        ? 'bg-green-950/30 text-green-400 border-green-500/30 opacity-70 cursor-default' 
-                        : 'bg-[#0D1117] text-gray-300 border-[#30363D] hover:border-indigo-500/40 hover:text-white'
-                    }`}
-                  >
-                    {isAdded ? (
-                      <Check className="w-3 h-3 text-green-400" />
-                    ) : (
-                      <Plus className="w-3 h-3 text-indigo-400" />
-                    )}
-                    <span>{preset.name}</span>
-                  </button>
-                );
-              })}
             </div>
           </div>
 
