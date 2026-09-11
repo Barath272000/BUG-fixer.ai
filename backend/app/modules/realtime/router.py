@@ -13,6 +13,7 @@ import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from app.common.websocket.realtime_gateway import channel_for_project
+from app.core.config import settings
 from app.core.redis_client import get_redis_client
 from app.core.security import decode_access_token
 
@@ -25,15 +26,19 @@ async def realtime_endpoint(websocket: WebSocket) -> None:
     token = websocket.query_params.get("token")
     project_id = websocket.query_params.get("projectId")
 
-    if not token or not project_id:
-        await websocket.close(code=4400, reason="token and projectId are required")
+    if not project_id:
+        await websocket.close(code=4400, reason="projectId is required")
         return
 
-    try:
-        decode_access_token(token)
-    except ValueError:
-        await websocket.close(code=4401, reason="Invalid or expired token")
-        return
+    if not settings.DEV_SKIP_AUTH:
+        if not token:
+            await websocket.close(code=4400, reason="token is required")
+            return
+        try:
+            decode_access_token(token)
+        except ValueError:
+            await websocket.close(code=4401, reason="Invalid or expired token")
+            return
 
     await websocket.accept()
 

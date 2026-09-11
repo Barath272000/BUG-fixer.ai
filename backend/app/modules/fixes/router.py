@@ -6,8 +6,19 @@ from app.common.middleware.auth import AuthUser, require_auth
 from app.db.session import get_db
 from app.modules.fixes.schemas import FixOut, GenerateFixRequest, ValidateFixRequest
 from app.modules.fixes.service import apply_fix, generate_fix, get_fix, list_fixes, revert_fix, validate_fix
-
+from app.modules.fixes.service import apply_fix, generate_fix, get_fix, get_fix_summary, list_fixes, revert_fix, validate_fix
 router = APIRouter(prefix="/fixes", tags=["fixes"])
+
+
+@router.get("/summary")
+async def summary(
+    current_user: AuthUser = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    return await get_fix_summary(db, current_user.id)
+
+
+@router.get("/{fix_id}", response_model=FixOut)
 
 
 @router.get("/history", response_model=list[FixOut])

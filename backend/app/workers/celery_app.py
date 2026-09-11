@@ -32,13 +32,15 @@ async def _run(analysis_id: str, project_id: str) -> None:
     # doesn't need the full app import graph (models, gateway, etc.) just to
     # start up and register tasks.
     from app.common.websocket.realtime_gateway import RealtimeGateway
-    from app.db.session import AsyncSessionLocal
+    from app.db.session import AsyncSessionLocal, engine
     from app.modules.analysis.pipeline_runner import run_analysis_pipeline
 
     gateway = RealtimeGateway()
-    async with AsyncSessionLocal() as db:
-        await run_analysis_pipeline(db, gateway, analysis_id, project_id)
-
+    try:
+        async with AsyncSessionLocal() as db:
+            await run_analysis_pipeline(db, gateway, analysis_id, project_id)
+    finally:
+        await engine.dispose()
 
 @celery_app.task(name="analysis.run")
 def run_analysis_task(analysis_id: str, project_id: str, owner_id: str) -> None:

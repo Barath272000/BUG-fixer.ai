@@ -6,11 +6,10 @@
  * - Otherwise, auto-detects by replacing frontend port with backend port (4000)
  * This ensures the app works across Codespace environment restarts without manual config
  *
- * AUTH (temporary, until a real login screen is built):
- * Run `npm run seed:dev-user` in /backend, copy the printed JWT below.
- * Every request automatically sends it as `Authorization: Bearer <token>`.
- * Swap this out for a real auth flow (stored token from /auth/login)
- * once the login screen exists — search this file for "DEV_TOKEN".
+ * AUTH:
+ * Use a token saved by a future login screen, or VITE_DEV_TOKEN for a local
+ * authenticated setup. When backend DEV_SKIP_AUTH is enabled, requests are
+ * intentionally sent without a token and the backend creates the dev user.
  */
 
 /**
@@ -43,12 +42,10 @@ function resolveApiBaseUrl(): string {
 export const API_BASE_URL = resolveApiBaseUrl();
 const API_PREFIX = '/api/v1';
 
-// TODO: replace with the token printed by `npm run seed:dev-user` (backend/prisma/seed-dev-user.ts)
-
-const DEV_TOKEN = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6ImM3Y2E3ZWJkLTQ3YTQtNGM4Mi04ODE2LTgxMDU1NmRmYzhlZCIsImVtYWlsIjoiZGV2QGV4YW1wbGUuY29tIiwiZGlzcGxheU5hbWUiOiJMb2NhbCBEZXZlbG9wZXIiLCJyb2xlIjoiVVNFUiIsImlhdCI6MTc4OTA0NDAwMywiZXhwIjoxNzg5MDQ3NjAzfQ.2ZfMhlpmi1FR7ZH75yZq66njU_Re6-xD2kpfMQbvAow';
-
 export function getAuthToken(): string {
-  return DEV_TOKEN;
+  return window.localStorage.getItem('bugfixer_access_token')
+    || import.meta.env.VITE_DEV_TOKEN
+    || '';
 }
 
 /** Builds the ws(s):// URL for the realtime gateway, scoped to a project. */
@@ -56,7 +53,9 @@ export function getRealtimeSocketUrl(projectId: string): string {
   const wsBase = API_BASE_URL
     ? API_BASE_URL.replace(/^http/, 'ws')
     : `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`;
-  const params = new URLSearchParams({ token: getAuthToken(), projectId });
+  const params = new URLSearchParams({ projectId });
+  const token = getAuthToken();
+  if (token) params.set('token', token);
   return `${wsBase}/realtime?${params.toString()}`;
 }
 
@@ -106,7 +105,8 @@ export async function apiRequest<T>(path: string, options: RequestOptions = {}):
   const { method = 'GET', body, signal } = options;
 
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (DEV_TOKEN) headers.Authorization = `Bearer ${DEV_TOKEN}`;
+  const token = getAuthToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
 
   let response: Response;
   try {

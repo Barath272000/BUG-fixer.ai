@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import React, { useEffect, useRef, useState } from 'react';
 import { ApiError, apiRequest, getRealtimeSocketUrl, uploadProjectArchive } from '../api/client';
+import { fetchAnalysisLogs } from '../api/analysis';
 import { connectGithubRepo, getGithubTokenStatus, parseGithubUrl } from '../api/github';
 import { pipelinePhases as initialPipelinePhases } from '../data/mockData';
 import { ContextDoc, PipelinePhase } from '../types';
@@ -34,6 +35,13 @@ interface BackendPhase {
   description: string;
   status: 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED';
   durationMs?: number | null;
+  subprocesses?: PipelinePhase['subprocesses'];
+  validationReport?: PipelinePhase['validationReport'];
+}
+
+interface AnalysisDetailResponse {
+  status: 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
+  phases: BackendPhase[];
 }
 
 function backendPhaseStatus(status: BackendPhase['status']): PipelinePhase['status'] {
@@ -193,9 +201,50 @@ export const DashboardView: React.FC = () => {
     setContextDocs([]);
   };
 
-  const connectRealtimeSocket = (pid: string) => {
+  const hydrateAnalysisPhases = (id: string) => {
+    apiRequest<AnalysisDetailResponse>(`/analysis/${id}`)
+      .then((analysis) => {
+        setIsAnalyzing(analysis.status === 'QUEUED' || analysis.status === 'RUNNING');
+        setPhases(prev => prev.map(phase => {
+          const backendPhase = analysis.phases.find(item => item.number === phase.id);
+          if (!backendPhase) return phase;
+          return {
+            ...phase,
+            name: backendPhase.name,
+            description: backendPhase.description,
+            status: backendPhaseStatus(backendPhase.status),
+            duration: backendPhase.durationMs ? `${(backendPhase.durationMs / 1000).toFixed(1)}s` : phase.duration,
+            subprocesses: backendPhase.subprocesses ?? phase.subprocesses,
+            validationReport: backendPhase.validationReport ?? phase.validationReport,
+          };
+        }));
+        setProgress(Math.round(
+          (analysis.phases.filter(phase => phase.status === 'COMPLETED').length / pendingPipelinePhases.length) * 100,
+        ));
+      })
+      .catch(() => {
+        // Realtime updates remain usable when the snapshot request races shutdown.
+      });
+
+    fetchAnalysisLogs(id)
+      .then((backendLogs) => setLogs(backendLogs.map((log) => ({
+        ...log,
+        timestamp: new Date(log.timestamp).toLocaleTimeString('en-US', { hour12: false }) + '.' + String(new Date(log.timestamp).getMilliseconds()).padStart(3, '0'),
+        category: log.category,
+      }))))
+      .catch(() => {
+        // The phase snapshot remains useful when log history is unavailable.
+      });
+  };
+
+  const connectRealtimeSocket = (pid: string, runId: string) => {
     const socket = new WebSocket(getRealtimeSocketUrl(pid));
     socketRef.current = socket;
+
+    socket.onopen = () => {
+      // Reconcile runs that completed before the websocket subscription opened.
+      hydrateAnalysisPhases(runId);
+    };
 
     socket.onmessage = (event) => {
       let data: { type: string; payload: unknown };
@@ -208,12 +257,18 @@ export const DashboardView: React.FC = () => {
       if (data.type === 'phase.started' || data.type === 'phase.progress') {
         const phase = data.payload as BackendPhase;
         setCurrentExecutingPhase(phase.name);
-        setPhases(prev => prev.map(p => p.id === phase.number ? {
-          ...p,
-          status: backendPhaseStatus(phase.status),
-          duration: phase.durationMs ? `${(phase.durationMs / 1000).toFixed(1)}s` : p.duration,
-        } : p));
-        setProgress(Math.round((phase.number / pendingPipelinePhases.length) * 100));
+        setPhases(prev => {
+          const next = prev.map(p => p.id === phase.number ? {
+            ...p,
+            name: phase.name || p.name,
+            status: backendPhaseStatus(phase.status),
+            duration: phase.durationMs ? `${(phase.durationMs / 1000).toFixed(1)}s` : p.duration,
+          } : p);
+          setProgress(Math.round(
+            (next.filter(item => item.status === 'completed').length / pendingPipelinePhases.length) * 100,
+          ));
+          return next;
+        });
       } else if (data.type === 'phase.subprocess') {
         const payload = data.payload as { number: number; subprocesses: PipelinePhase['subprocesses'] };
         setPhases(prev => prev.map(p => p.id === payload.number ? {
@@ -237,13 +292,14 @@ export const DashboardView: React.FC = () => {
         }]);
       } else if (data.type === 'analysis.completed') {
         setIsAnalyzing(false);
-        setProgress(100);
+        hydrateAnalysisPhases(runId);
         refreshRecentRuns();
         socket.close();
       } else if (data.type === 'analysis.failed') {
         const payload = data.payload as { message?: string };
         setIsAnalyzing(false);
         setPipelineError(payload?.message ?? 'Analysis pipeline failed');
+        hydrateAnalysisPhases(runId);
         refreshRecentRuns();
         socket.close();
       }
@@ -287,7 +343,9 @@ export const DashboardView: React.FC = () => {
       refreshRecentRuns();
 
       // 4. Stream phase/log updates over the realtime WebSocket gateway
-      connectRealtimeSocket(project.id);
+      connectRealtimeSocket(project.id, run.id);
+      // The worker can finish phases before the socket handshake completes.
+      hydrateAnalysisPhases(run.id);
     } catch (error) {
       setIsAnalyzing(false);
       setPipelineError(error instanceof ApiError ? error.message : 'Failed to start the analysis pipeline.');
@@ -338,7 +396,8 @@ export const DashboardView: React.FC = () => {
       setAnalysisId(run.id);
       refreshRecentRuns();
 
-      connectRealtimeSocket(project.id);
+      connectRealtimeSocket(project.id, run.id);
+      hydrateAnalysisPhases(run.id);
     } catch (error) {
       setIsAnalyzing(false);
       setPipelineError(error instanceof ApiError ? error.message : 'Failed to connect and clone the repository.');

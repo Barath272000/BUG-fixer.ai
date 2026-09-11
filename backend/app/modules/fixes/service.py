@@ -76,6 +76,40 @@ async def list_fixes(db: AsyncSession, user_id: str) -> list[FixProposal]:
 async def get_fix(db: AsyncSession, user_id: str, fix_id: str) -> FixProposal:
     return await _assert_fix_access(db, user_id, fix_id)
 
+async def get_fix_summary(db: AsyncSession, user_id: str) -> dict:
+    fixes = await list_fixes(db, user_id)
+
+    if not fixes:
+        return {
+            "projectCount": 0,
+            "dateSpanDays": 0,
+            "regressionsFound": 0,
+            "acceptanceRate": 0,
+            "estimatedDollarsSaved": 0,
+        }
+
+    project_count = len({f.projectId for f in fixes})
+
+    created_dates = [f.createdAt for f in fixes]
+    date_span_days = (max(created_dates) - min(created_dates)).days
+
+    regressions_found = sum(
+        1 for f in fixes for v in f.validations if v.regressionFound
+    )
+
+    applied_count = sum(1 for f in fixes if f.status == FixStatus.Applied)
+    acceptance_rate = round((applied_count / len(fixes)) * 100) if fixes else 0
+
+    total_minutes_saved = sum(f.estimatedMinutes for f in fixes)
+    estimated_dollars_saved = round((total_minutes_saved / 60) * 75)
+
+    return {
+        "projectCount": project_count,
+        "dateSpanDays": date_span_days,
+        "regressionsFound": regressions_found,
+        "acceptanceRate": acceptance_rate,
+        "estimatedDollarsSaved": estimated_dollars_saved,
+    }
 
 async def validate_fix(db: AsyncSession, user_id: str, fix_id: str, command: str) -> dict:
     fix = await _assert_fix_access(db, user_id, fix_id)

@@ -16,6 +16,9 @@ class TestSummary:
 
 def parse_generic_test_output(stdout: str, stderr: str, exit_code: int) -> TestSummary:
     combined = f"{stdout}\n{stderr}"
+    if re.search(r"(?:Ran\s+0\s+tests?|NO\s+TESTS\s+RAN|no\s+tests?\s+(?:found|ran))", combined, re.IGNORECASE):
+        return TestSummary(total=0, passed=0, failed=0, skipped=0, status="NO_TESTS")
+
     match = _SUMMARY_RE.search(combined)
     status = "PASSED" if exit_code == 0 else "FAILED"
 
