@@ -26,6 +26,7 @@ interface NotificationCenterProps {
   onClearAll: () => void;
   onNavigateTab: (tab: NavigationTab) => void;
   onSelectBugById?: (bugId: string) => void;
+  onDownloadFixes?: (notification: AppNotification) => void;
 }
 
 export const NotificationCenter: React.FC<NotificationCenterProps> = ({
@@ -38,7 +39,8 @@ export const NotificationCenter: React.FC<NotificationCenterProps> = ({
   onDismiss,
   onClearAll,
   onNavigateTab,
-  onSelectBugById
+  onSelectBugById,
+  onDownloadFixes,
 }) => {
   const [activeFilter, setActiveFilter] = useState<'all' | 'unread' | 'critical' | 'fix'>('all');
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -287,10 +289,24 @@ export const NotificationCenter: React.FC<NotificationCenterProps> = ({
                       <span>{n.timestamp}</span>
                     </div>
 
-                    <span className="text-indigo-400 hover:text-indigo-300 font-medium flex items-center gap-1 group-hover:underline">
-                      <span>View details</span>
-                      <ArrowRight className="w-2.5 h-2.5" />
-                    </span>
+                    {n.downloadAnalysisRunId && onDownloadFixes ? (
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onDownloadFixes(n);
+                        }}
+                        className="text-indigo-400 hover:text-indigo-300 font-medium flex items-center gap-1 cursor-pointer"
+                      >
+                        <span>Download AI fixes</span>
+                        <ArrowRight className="w-2.5 h-2.5" />
+                      </button>
+                    ) : (
+                      <span className="text-indigo-400 hover:text-indigo-300 font-medium flex items-center gap-1 group-hover:underline">
+                        <span>View details</span>
+                        <ArrowRight className="w-2.5 h-2.5" />
+                      </span>
+                    )}
                   </div>
                 </div>
 

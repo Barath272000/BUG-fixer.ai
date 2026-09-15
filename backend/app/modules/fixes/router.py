@@ -1,5 +1,5 @@
 """Mirrors: backend/src/modules/fixes/{fix.routes,fix.controller}.ts"""
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.middleware.auth import AuthUser, require_auth
@@ -23,10 +23,11 @@ async def summary(
 
 @router.get("/history", response_model=list[FixOut])
 async def history(
+    analysis_run_id: str | None = Query(default=None, alias="analysisRunId"),
     current_user: AuthUser = Depends(require_auth),
     db: AsyncSession = Depends(get_db),
 ):
-    fixes = await list_fixes(db, current_user.id)
+    fixes = await list_fixes(db, current_user.id, analysis_run_id)
     return [FixOut.model_validate(f) for f in fixes]
 
 

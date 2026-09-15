@@ -62,7 +62,7 @@ async def generate_fix(db: AsyncSession, user_id: str, bug_id: str, provider: st
     return fix
 
 
-async def list_fixes(db: AsyncSession, user_id: str) -> list[FixProposal]:
+async def list_fixes(db: AsyncSession, user_id: str, analysis_run_id: str | None = None) -> list[FixProposal]:
     stmt = (
         select(FixProposal)
         .join(Project, FixProposal.projectId == Project.id)
@@ -70,6 +70,8 @@ async def list_fixes(db: AsyncSession, user_id: str) -> list[FixProposal]:
         .order_by(FixProposal.createdAt.desc())
         .options(selectinload(FixProposal.bug), selectinload(FixProposal.validations))
     )
+    if analysis_run_id is not None:
+        stmt = stmt.where(FixProposal.analysisRunId == analysis_run_id)
     return (await db.execute(stmt)).scalars().all()
 
 

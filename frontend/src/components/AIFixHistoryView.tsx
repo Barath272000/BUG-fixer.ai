@@ -4,9 +4,10 @@ import { fetchFixHistory, fetchFixSummary } from '../api/fixes';
 import { AIFixHistoryItem, FixSummary } from '../types';
 
 interface AIFixHistoryViewProps {
+  refreshToken: number;
   onInspectFix: (item: AIFixHistoryItem) => void;
 }
-export const AIFixHistoryView: React.FC<AIFixHistoryViewProps> = ({ onInspectFix }) => {
+export const AIFixHistoryView: React.FC<AIFixHistoryViewProps> = ({ refreshToken, onInspectFix }) => {
   const [historyItems, setHistoryItems] = useState<AIFixHistoryItem[]>([]);
   const [selectedFix, setSelectedFix] = useState<AIFixHistoryItem | null>(null);
 
@@ -20,7 +21,7 @@ export const AIFixHistoryView: React.FC<AIFixHistoryViewProps> = ({ onInspectFix
         console.error('Failed to load fix history:', err);
       }
     })();
-  }, []);
+  }, [refreshToken]);
 
   const totalFixes = historyItems.length;
   const appliedFixes = historyItems.filter(i => i.status === 'Applied').length;
@@ -39,7 +40,7 @@ export const AIFixHistoryView: React.FC<AIFixHistoryViewProps> = ({ onInspectFix
         console.error('Failed to load fix summary:', err);
       }
     })();
-  }, []);
+  }, [refreshToken]);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'Applied' | 'Ready' | 'Superseded'>('ALL');

@@ -1,6 +1,9 @@
 import { ChevronDown } from 'lucide-react';
 import React, { useState } from 'react';
 import { createBugApi, fetchBugs, getOrCreateDefaultProject, updateBugStatusApi } from './api/bugs';
+import { fetchSettings } from './api/settings';
+import { downloadAnalysisFixes } from './api/fixes';
+import { fetchProviderUsage } from './api/credentials';
 import { AIFixHistoryView } from './components/AIFixHistoryView';
 import { AnalyticsView } from './components/AnalyticsView';
 import { BugListView } from './components/BugListView';
@@ -8,7 +11,7 @@ import { DashboardView } from './components/DashboardView';
 import { DocsView } from './components/DocsView';
 import { InspectFixModal } from './components/InspectFixModal';
 import { LogBugModal } from './components/LogBugModal';
-import { ModelSelectorModal } from './components/ModelSelectorModal';
+import { defaultModels, ModelSelectorModal } from './components/ModelSelectorModal';
 import { NotificationBell, NotificationCenter } from './components/NotificationCenter';
 import { SettingsView } from './components/SettingsView';
 import { Sidebar } from './components/Sidebar';
@@ -27,6 +30,9 @@ export default function App() {
   const [workspaceTargetBug, setWorkspaceTargetBug] = useState<Bug | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [currentModel, setCurrentModel] = useState('GPT-4-Turbo');
+  const [activeModelBackend, setActiveModelBackend] = useState<{ provider: string; model: string } | null>(null);
+  const [fixHistoryRefreshToken, setFixHistoryRefreshToken] = useState(0);
+  const quotaAlertsRef = React.useRef(new Set<string>());
 
   // --- Notifications (starts empty — populated from real events as they happen) ---
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
@@ -48,6 +54,36 @@ export default function App() {
     setNotifications([]);
   };
 
+  const handleAnalysisCompleted = (analysisRunId: string, analyzedProjectName: string) => {
+    setNotifications((prev) => [{
+      id: `analysis-fixes-${analysisRunId}`,
+      title: 'AI fixes are ready',
+      message: `All 8 analysis phases finished for ${analyzedProjectName || 'the project'}. Download the generated AI fix file?`,
+      timestamp: 'just now',
+      read: false,
+      type: 'fix',
+      actionTab: 'ai-fix-history',
+      downloadAnalysisRunId: analysisRunId,
+      downloadProjectName: analyzedProjectName,
+    }, ...prev]);
+  };
+
+  const handleDownloadFixes = async (notification: AppNotification) => {
+    if (!notification.downloadAnalysisRunId) return;
+    try {
+      const count = await downloadAnalysisFixes(
+        notification.downloadAnalysisRunId,
+        notification.downloadProjectName || 'project',
+      );
+      if (count === 0) {
+        console.info('No AI fix proposals were generated for this analysis.');
+      }
+      setNotifications((prev) => prev.filter((item) => item.id !== notification.id));
+    } catch (error) {
+      console.error('Failed to download AI fixes:', error);
+    }
+  };
+
   const handleSelectBugById = (bugId: string) => {
     const target = bugs.find(b => b.id === bugId || b.code === bugId);
     if (target) setInspectingBug(target);
@@ -57,10 +93,18 @@ export default function App() {
   React.useEffect(() => {
     (async () => {
       try {
-        const pid = await getOrCreateDefaultProject();
+        const [pid, settings] = await Promise.all([
+          getOrCreateDefaultProject(),
+          fetchSettings(),
+        ]);
         setProjectId(pid);
         const realBugs = await fetchBugs(pid);
         setBugs(realBugs);
+        const savedModel = defaultModels.find(
+          (model) => model.backend.provider === settings.primaryProvider && model.backend.model === settings.primaryModel,
+        );
+        setCurrentModel(savedModel?.id ?? settings.primaryModel);
+        setActiveModelBackend({ provider: settings.primaryProvider, model: settings.primaryModel });
         setBackendConnected(true);
       } catch (err) {
         console.error('Failed to load backend data:', err);
@@ -68,6 +112,56 @@ export default function App() {
       }
     })();
   }, []);
+
+  React.useEffect(() => {
+    if (!activeModelBackend) return;
+    let cancelled = false;
+
+    const checkQuota = async () => {
+      try {
+        const usage = await fetchProviderUsage(activeModelBackend.provider);
+        if (cancelled) return;
+        const modelUsage = usage.models.find((item) => item.model === activeModelBackend.model);
+        if (!modelUsage) return;
+
+        const limit = modelUsage.limitTokens ?? modelUsage.limitRequests;
+        const remaining = modelUsage.remainingTokens ?? modelUsage.remainingRequests;
+        if (!limit || remaining == null) return;
+
+        const percent = (remaining / limit) * 100;
+        const thresholds = percent <= 0 || modelUsage.exhausted
+          ? [{ key: 'exhausted', threshold: 0, title: 'AI model quota exhausted', type: 'critical' as const }]
+          : percent <= 10
+          ? [{ key: '10', threshold: 10, title: 'AI model quota is below 10%', type: 'critical' as const }]
+          : percent <= 50
+          ? [{ key: '50', threshold: 50, title: 'AI model quota is below 50%', type: 'info' as const }]
+          : [];
+
+        thresholds.forEach(({ key, threshold, title, type }) => {
+          const alertKey = `${activeModelBackend.provider}:${activeModelBackend.model}:${key}`;
+          if (quotaAlertsRef.current.has(alertKey)) return;
+          quotaAlertsRef.current.add(alertKey);
+          setNotifications((prev) => [{
+            id: `model-quota-${alertKey}`,
+            title,
+            message: `${activeModelBackend.model} has approximately ${Math.max(0, Math.round(percent))}% quota remaining${threshold ? ` (threshold ${threshold}%)` : ''}.`,
+            timestamp: 'just now',
+            read: false,
+            type,
+          }, ...prev]);
+        });
+      } catch {
+        // Quota headers are provider-specific; a failed check should not interrupt the app.
+      }
+    };
+
+    void checkQuota();
+    const interval = window.setInterval(() => void checkQuota(), 20_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [activeModelBackend]);
 
   const handleAddBug = async (newBug: Bug) => {
     if (!projectId) return;
@@ -93,6 +187,16 @@ export default function App() {
   const handleNavigateToWorkspaceWithBug = (bug: Bug) => {
     setWorkspaceTargetBug(bug);
     setActiveTab('workspace');
+  };
+
+  const handleAnalysisDataChanged = async (analyzedProjectId: string) => {
+    setProjectId(analyzedProjectId);
+    try {
+      setBugs(await fetchBugs(analyzedProjectId));
+      setFixHistoryRefreshToken((token) => token + 1);
+    } catch (err) {
+      console.error('Failed to refresh analyzed project data:', err);
+    }
   };
 
   return (
@@ -183,7 +287,12 @@ export default function App() {
 
         {/* Dynamic Center View */}
         <main className="flex-1 flex flex-col bg-[#0B0E14] overflow-hidden min-w-0">
-          {activeTab === 'dashboard' && <DashboardView />}
+          {activeTab === 'dashboard' && (
+            <DashboardView
+              onAnalysisDataChanged={handleAnalysisDataChanged}
+              onAnalysisCompleted={handleAnalysisCompleted}
+            />
+          )}
           
           {activeTab === 'bugs' && (
             <BugListView
@@ -196,6 +305,7 @@ export default function App() {
 
           {activeTab === 'ai-fix-history' && (
             <AIFixHistoryView
+              refreshToken={fixHistoryRefreshToken}
               onInspectFix={(item) => setInspectingHistoryItem(item)}
             />
           )}
@@ -260,7 +370,13 @@ export default function App() {
         isOpen={isModelSelectorOpen}
         onClose={() => setIsModelSelectorOpen(false)}
         currentModel={currentModel}
-        onSelectModel={(model) => setCurrentModel(model)}
+        onSelectModel={(model) => {
+          setCurrentModel(model);
+          quotaAlertsRef.current.clear();
+          void fetchSettings().then((settings) => {
+            setActiveModelBackend({ provider: settings.primaryProvider, model: settings.primaryModel });
+          });
+        }}
       />
 
       <NotificationCenter
@@ -274,6 +390,7 @@ export default function App() {
         onClearAll={handleClearAllNotifications}
         onNavigateTab={setActiveTab}
         onSelectBugById={handleSelectBugById}
+        onDownloadFixes={handleDownloadFixes}
       />
     </div>
   );

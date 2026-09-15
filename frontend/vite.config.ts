@@ -9,7 +9,7 @@ export default defineConfig({
     tailwindcss(),
   ],
   server: {
-    port: 3000,
+    port: 5173,
     host: '0.0.0.0',
     // Vite 6+ rejects requests whose Host header it doesn't recognize.
     // Codespaces/devcontainer forwarding uses a rotating *.app.github.dev

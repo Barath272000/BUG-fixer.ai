@@ -138,4 +138,6 @@ export interface AppNotification {
   bugId?: string;
   actionTab?: NavigationTab;
   codeSnippet?: string;
+  downloadAnalysisRunId?: string;
+  downloadProjectName?: string;
 }
