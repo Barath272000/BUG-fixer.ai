@@ -38,7 +38,7 @@ from app.modules.fixes.service import generate_fix
 from app.modules.fixes.patch_service import apply_simple_replacement, read_workspace_file, write_workspace_file
 from app.modules.fixes.validation_service import validate_workspace
 from app.models.project import Project
-from app.modules.analysis.detectors import detect_build_command, detect_test_command
+from app.modules.analysis.detectors import detect_build_command, detect_preview, detect_test_command
 from app.modules.analysis.phase_manager import PIPELINE_DEFINITIONS
 from app.modules.analysis.pipeline_service import add_log, set_security_report, set_subprocesses
 from app.modules.code_analysis.project_inspector import inspect_project
@@ -369,9 +369,15 @@ async def run_analysis_pipeline(db: AsyncSession, gateway: RealtimeGateway, anal
                 )
                 project.language = inspection["language"]
                 project.framework = inspection["framework"]
+                preview_command, preview_port = await detect_preview(work_root, inspection["language"])
+                project.previewCommand = preview_command
+                project.previewPort = preview_port
                 await db.commit()
                 await add_log(db, gateway, analysis_id, project_id, "PASS", "Project Setup",
                               f"Detected {inspection['language']} with {inspection['framework']}", phase.id)
+                if preview_command:
+                    await add_log(db, gateway, analysis_id, project_id, "INFO", "Project Setup",
+                                  f"Preview available: {preview_command} on port {preview_port}", phase.id)
 
             # Phase 3: create and exercise the isolated execution environment
             if definition["number"] == 3:

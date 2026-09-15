@@ -24,6 +24,8 @@ class Project(Base):
     workspacePath: Mapped[str | None] = mapped_column(String, nullable=True)
     language: Mapped[str | None] = mapped_column(String, nullable=True)
     framework: Mapped[str | None] = mapped_column(String, nullable=True)
+    previewCommand: Mapped[str | None] = mapped_column(String, nullable=True)
+    previewPort: Mapped[int | None] = mapped_column(nullable=True)
     createdAt: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updatedAt: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

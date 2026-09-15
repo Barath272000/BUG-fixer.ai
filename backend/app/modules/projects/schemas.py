@@ -43,6 +43,8 @@ class ProjectOut(BaseModel):
     workspacePath: str | None
     language: str | None
     framework: str | None
+    previewCommand: str | None
+    previewPort: int | None
     createdAt: datetime
     updatedAt: datetime
     workspace: WorkspaceOut | None = None

@@ -56,3 +56,72 @@ async def detect_test_command(root: str, language: str) -> str:
     if language == "Rust":
         return "cargo test"
     return 'echo "No supported test command detected"'
+
+
+async def detect_preview(root: str, language: str) -> tuple[str | None, int | None]:
+    """Best-effort detection of a runnable web-server command + port for the
+    Preview feature. Returns (command, port) or (None, None) when nothing
+    that looks like a web server was found. This is a guess, not a
+    guarantee — e.g. a Flask app that calls app.run() without host="0.0.0.0"
+    will bind to localhost-only inside the container and won't be reachable
+    through the published port even though the command itself "succeeds".
+    """
+    if language in ("JavaScript", "TypeScript"):
+        pkg_path = os.path.join(root, "package.json")
+        try:
+            with open(pkg_path, "r", encoding="utf-8") as f:
+                pkg = json.load(f)
+            scripts = pkg.get("scripts", {})
+            deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+            if scripts.get("start"):
+                port = 3000
+                if "next" in deps:
+                    port = 3000
+                elif "vite" in deps:
+                    port = 5173
+                return "npm start", port
+            if scripts.get("dev"):
+                return "npm run dev -- --host 0.0.0.0", 5173 if "vite" in deps else 3000
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+        return None, None
+
+    if language == "Python":
+        try:
+            with open(os.path.join(root, "requirements.txt"), "r", encoding="utf-8") as f:
+                reqs = f.read().lower()
+        except FileNotFoundError:
+            reqs = ""
+        if os.path.exists(os.path.join(root, "manage.py")):
+            return "python manage.py runserver 0.0.0.0:8000", 8000
+        if "fastapi" in reqs or "uvicorn" in reqs:
+            entry = "main:app" if os.path.exists(os.path.join(root, "main.py")) else "app:app"
+            return f"pip install -q uvicorn 2>/dev/null; uvicorn {entry} --host 0.0.0.0 --port 8000", 8000
+        if "flask" in reqs:
+            entry = "app.py" if os.path.exists(os.path.join(root, "app.py")) else "main.py"
+            if os.path.exists(os.path.join(root, entry)):
+                return f"python {entry}", 5000
+        return None, None
+
+    if language == "Go":
+        if os.path.exists(os.path.join(root, "go.mod")):
+            try:
+                with open(os.path.join(root, "go.mod"), "r", encoding="utf-8") as f:
+                    gomod = f.read().lower()
+            except FileNotFoundError:
+                gomod = ""
+            if any(fw in gomod for fw in ("net/http", "gin-gonic", "labstack/echo", "gofiber")):
+                return "go run .", 8080
+        return None, None
+
+    if language == "Rust":
+        try:
+            with open(os.path.join(root, "Cargo.toml"), "r", encoding="utf-8") as f:
+                cargo = f.read().lower()
+        except FileNotFoundError:
+            cargo = ""
+        if any(fw in cargo for fw in ("actix-web", "axum", "rocket", "warp")):
+            return "cargo run", 8080
+        return None, None
+
+    return None, None
