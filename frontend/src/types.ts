@@ -125,3 +125,17 @@ export interface ContextDoc {
   uploadedAt: string;
   description?: string;
 }
+
+export type NotificationType = 'critical' | 'fix' | 'security' | 'system' | 'info';
+
+export interface AppNotification {
+  id: string;
+  title: string;
+  message: string;
+  timestamp: string;
+  read: boolean;
+  type: NotificationType;
+  bugId?: string;
+  actionTab?: NavigationTab;
+  codeSnippet?: string;
+}

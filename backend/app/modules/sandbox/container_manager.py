@@ -71,13 +71,9 @@ async def start_preview_container(workspace: str, command: str, language: str, c
     return {"ok": True, "hostPort": host_port, "containerName": name}
 
 
-async def stop_preview_container(name: str) -> None:
-    proc = await asyncio.create_subprocess_exec(
-        "docker", "stop", "-t", "2", name,
-        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-    )
-    await proc.wait()  # no-op (exit code ignored) if the container doesn't exist
-    image = image_for_language(language)
+async def execute_in_docker(workspace: str, command: str, language: str | None = None) -> CommandResult:
+    """Executes a one-shot sandbox command inside a disposable Docker container."""
+    image = image_for_language(language or "python")
     args = [
         "docker", "run", "--rm",
         "--network", sandbox_limits.network,
@@ -122,3 +118,11 @@ async def stop_preview_container(name: str) -> None:
             stderr="Sandbox timed out",
             duration_ms=duration_ms,
         )
+
+
+async def stop_preview_container(name: str) -> None:
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "stop", "-t", "2", name,
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+    )
+    await proc.wait()  # no-op (exit code ignored) if the container doesn't exist

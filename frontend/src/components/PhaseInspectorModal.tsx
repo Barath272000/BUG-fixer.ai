@@ -10,6 +10,7 @@ import {
   FileCheck,
   FileText,
   FolderGit2,
+  Globe,
   HardDrive,
   Layers,
   Lock,
@@ -39,6 +40,10 @@ interface PhaseInspectorModalProps {
   analysisId?: string | null;
   onRerunSecurityChecks?: () => void;
   onRerunValidation?: (simulateFail?: boolean) => void;
+  /** Opens the live app preview (Phase 5: Run & Test) in a new browser tab. */
+  onOpenPreview?: () => void;
+  previewLoading?: boolean;
+  previewError?: string | null;
 }
 
 export const PhaseInspectorModal: React.FC<PhaseInspectorModalProps> = ({
@@ -49,7 +54,10 @@ export const PhaseInspectorModal: React.FC<PhaseInspectorModalProps> = ({
   contextDocs,
   analysisId,
   onRerunSecurityChecks,
-  onRerunValidation
+  onRerunValidation,
+  onOpenPreview,
+  previewLoading,
+  previewError
 }) => {
   const [activeTab, setActiveTab] = useState<'details' | 'subprocesses' | 'raw-logs' | 'validation-report'>('details');
   const [copied, setCopied] = useState(false);
@@ -501,6 +509,40 @@ export const PhaseInspectorModal: React.FC<PhaseInspectorModalProps> = ({
                       </pre>
                     </div>
                   </div>
+                </div>
+              )}
+
+              {/* PHASE 5: Run & Test — Live Application Preview */}
+              {phase.id === 5 && (
+                <div className="p-3.5 rounded-lg bg-[#161B22] border border-[#30363D] space-y-3">
+                  <div className="flex items-center gap-2">
+                    <Globe className="w-4 h-4 text-indigo-400" />
+                    <div className="text-xs font-bold text-gray-200">Live Application Preview</div>
+                  </div>
+                  <p className="text-[11px] text-gray-400 leading-relaxed">
+                    Runs the project as a real, reachable web server in a sandboxed container and
+                    opens it in a new browser tab. Requires this phase to have completed at least
+                    once so a runnable start command has been detected.
+                  </p>
+
+                  {previewError && (
+                    <div className="p-2.5 rounded bg-red-950/40 border border-red-500/30 text-[11px] text-red-300">
+                      {previewError}
+                    </div>
+                  )}
+
+                  <button
+                    onClick={onOpenPreview}
+                    disabled={!onOpenPreview || previewLoading}
+                    className="flex items-center gap-2 px-3.5 py-2 rounded-md bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs font-semibold transition-colors shadow-sm cursor-pointer"
+                  >
+                    {previewLoading ? (
+                      <RefreshCcw className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Globe className="w-3.5 h-3.5" />
+                    )}
+                    <span>{previewLoading ? 'Starting preview…' : 'Open Live Preview'}</span>
+                  </button>
                 </div>
               )}
 

@@ -66,22 +66,29 @@ async def detect_preview(root: str, language: str) -> tuple[str | None, int | No
     will bind to localhost-only inside the container and won't be reachable
     through the published port even though the command itself "succeeds".
     """
-    if language in ("JavaScript", "TypeScript"):
-        pkg_path = os.path.join(root, "package.json")
+    root_pkg_path = os.path.join(root, "package.json")
+    nested_pkg_path = os.path.join(root, "frontend", "package.json")
+    if language in ("JavaScript", "TypeScript") or os.path.exists(nested_pkg_path):
+        pkg_path = root_pkg_path
+        package_dir = "."
+        if not os.path.exists(pkg_path) and os.path.exists(nested_pkg_path):
+            pkg_path = nested_pkg_path
+            package_dir = "frontend"
         try:
             with open(pkg_path, "r", encoding="utf-8") as f:
                 pkg = json.load(f)
             scripts = pkg.get("scripts", {})
             deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+            prefix = f"cd {package_dir} && " if package_dir != "." else ""
             if scripts.get("start"):
                 port = 3000
                 if "next" in deps:
                     port = 3000
                 elif "vite" in deps:
                     port = 5173
-                return "npm start", port
+                return f"{prefix}npm start", port
             if scripts.get("dev"):
-                return "npm run dev -- --host 0.0.0.0", 5173 if "vite" in deps else 3000
+                return f"{prefix}npm run dev -- --host 0.0.0.0", 5173 if "vite" in deps else 3000
         except (FileNotFoundError, json.JSONDecodeError):
             pass
         return None, None

@@ -56,7 +56,7 @@ async def start_preview(db: AsyncSession, owner_id: str, project_id: str) -> dic
     result = await start_preview_container(
         workspace=project.workspace.rootPath,
         command=project.previewCommand,
-        language=project.language or "Unknown",
+        language="JavaScript" if "npm " in project.previewCommand else (project.language or "Unknown"),
         container_port=project.previewPort,
         name=_container_name(project_id),
     )

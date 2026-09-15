@@ -9,10 +9,11 @@ import { DocsView } from './components/DocsView';
 import { InspectFixModal } from './components/InspectFixModal';
 import { LogBugModal } from './components/LogBugModal';
 import { ModelSelectorModal } from './components/ModelSelectorModal';
+import { NotificationBell, NotificationCenter } from './components/NotificationCenter';
 import { SettingsView } from './components/SettingsView';
 import { Sidebar } from './components/Sidebar';
 import { WorkspaceView } from './components/WorkspaceView';
-import { AIFixHistoryItem, Bug, NavigationTab } from './types';
+import { AIFixHistoryItem, AppNotification, Bug, NavigationTab } from './types';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<NavigationTab>('workspace');
@@ -26,6 +27,32 @@ export default function App() {
   const [workspaceTargetBug, setWorkspaceTargetBug] = useState<Bug | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [currentModel, setCurrentModel] = useState('GPT-4-Turbo');
+
+  // --- Notifications (starts empty — populated from real events as they happen) ---
+  const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  const [isNotificationOpen, setIsNotificationOpen] = useState(false);
+
+  const handleMarkNotificationAsRead = (id: string) => {
+    setNotifications(prev => prev.map(n => (n.id === id ? { ...n, read: true } : n)));
+  };
+
+  const handleMarkAllNotificationsAsRead = () => {
+    setNotifications(prev => prev.map(n => ({ ...n, read: true })));
+  };
+
+  const handleDismissNotification = (id: string) => {
+    setNotifications(prev => prev.filter(n => n.id !== id));
+  };
+
+  const handleClearAllNotifications = () => {
+    setNotifications([]);
+  };
+
+  const handleSelectBugById = (bugId: string) => {
+    const target = bugs.find(b => b.id === bugId || b.code === bugId);
+    if (target) setInspectingBug(target);
+    setActiveTab('bugs');
+  };
 
   React.useEffect(() => {
     (async () => {
@@ -106,6 +133,13 @@ export default function App() {
 
           {/* Nav Links */}
           <div className="flex items-center gap-4">
+            <NotificationBell
+              notifications={notifications}
+              isOpen={isNotificationOpen}
+              onToggle={() => setIsNotificationOpen(prev => !prev)}
+              position="header"
+            />
+
             <button 
               onClick={() => setActiveTab('docs')}
               className={`text-xs transition-colors cursor-pointer ${
@@ -227,6 +261,19 @@ export default function App() {
         onClose={() => setIsModelSelectorOpen(false)}
         currentModel={currentModel}
         onSelectModel={(model) => setCurrentModel(model)}
+      />
+
+      <NotificationCenter
+        notifications={notifications}
+        isOpen={isNotificationOpen}
+        onClose={() => setIsNotificationOpen(false)}
+        onToggle={() => setIsNotificationOpen(prev => !prev)}
+        onMarkAsRead={handleMarkNotificationAsRead}
+        onMarkAllAsRead={handleMarkAllNotificationsAsRead}
+        onDismiss={handleDismissNotification}
+        onClearAll={handleClearAllNotifications}
+        onNavigateTab={setActiveTab}
+        onSelectBugById={handleSelectBugById}
       />
     </div>
   );

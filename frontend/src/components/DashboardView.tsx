@@ -13,6 +13,7 @@ import {
 import React, { useEffect, useRef, useState } from 'react';
 import { ApiError, apiRequest, getRealtimeSocketUrl, uploadProjectArchive } from '../api/client';
 import { fetchAnalysisLogs } from '../api/analysis';
+import { startPreview, stopPreview } from '../api/preview';
 import { connectGithubRepo, getGithubTokenStatus, parseGithubUrl } from '../api/github';
 import { pipelinePhases as initialPipelinePhases } from '../data/mockData';
 import { ContextDoc, PipelinePhase } from '../types';
@@ -111,17 +112,45 @@ export const DashboardView: React.FC = () => {
 
   // --- Detected tech stack (real project.language / project.framework — nothing fabricated) ---
   const [detectedStack, setDetectedStack] = useState<{ language: string | null; framework: string | null; status: string } | null>(null);
+  // --- Preview (Run & Test) state ---
+  const [previewCommand, setPreviewCommand] = useState<{ command: string; port: number } | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [previewActive, setPreviewActive] = useState(false);
 
   useEffect(() => {
     if (!projectId) {
       setDetectedStack(null);
+      setPreviewCommand(null);
+      setPreviewActive(false);
       return;
     }
-    apiRequest<{ language: string | null; framework: string | null; status: string }>(`/projects/${projectId}`)
-      .then((p) => setDetectedStack({ language: p.language, framework: p.framework, status: p.status }))
+    apiRequest<{ language: string | null; framework: string | null; status: string; previewCommand: string | null; previewPort: number | null }>(`/projects/${projectId}`)
+      .then((p) => {
+        setDetectedStack({ language: p.language, framework: p.framework, status: p.status });
+        setPreviewCommand(p.previewCommand && p.previewPort ? { command: p.previewCommand, port: p.previewPort } : null);
+      })
       .catch(() => setDetectedStack(null));
     // Re-check once analysis stops running (phase 2 may have just written language/framework).
   }, [projectId, isAnalyzing]);
+
+  const handleStartPreview = () => {
+    if (!projectId) return;
+    setPreviewLoading(true);
+    setPreviewError(null);
+    startPreview(projectId)
+      .then((res) => {
+        setPreviewActive(true);
+        window.open(res.url, '_blank', 'noopener,noreferrer');
+      })
+      .catch((err) => setPreviewError(err instanceof ApiError ? err.message : 'Could not start preview.'))
+      .finally(() => setPreviewLoading(false));
+  };
+
+  const handleStopPreview = () => {
+    if (!projectId) return;
+    stopPreview(projectId).finally(() => setPreviewActive(false));
+  };
 
   const refreshRecentRuns = React.useCallback(() => {
     apiRequest<RecentRunsResponse>('/analysis/recent')
@@ -827,8 +856,37 @@ export const DashboardView: React.FC = () => {
                       <span className={`w-1.5 h-1.5 rounded-full ${isAnalyzing ? 'bg-amber-400 animate-ping' : 'bg-green-400'}`} />
                       <span>{isAnalyzing ? 'Running' : progress === 100 ? 'Completed' : 'Standby'}</span>
                     </span>
+                    {previewCommand && (
+                      previewActive ? (
+                        <button
+                          type="button"
+                          onClick={handleStopPreview}
+                          className="px-2.5 py-1 rounded bg-rose-950/40 hover:bg-rose-950/60 border border-rose-500/30 text-[11px] font-mono text-rose-300 flex items-center gap-1.5 cursor-pointer transition-colors"
+                          title={`Stop preview (${previewCommand.command})`}
+                        >
+                          <span className="w-1.5 h-1.5 rounded-full bg-rose-400 animate-pulse" />
+                          <span>Stop Preview</span>
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={handleStartPreview}
+                          disabled={previewLoading}
+                          className="px-2.5 py-1 rounded bg-emerald-950/40 hover:bg-emerald-950/60 border border-emerald-500/30 text-[11px] font-mono text-emerald-300 flex items-center gap-1.5 cursor-pointer transition-colors disabled:opacity-50"
+                          title={`Preview: ${previewCommand.command} on port ${previewCommand.port}`}
+                        >
+                          <span>{previewLoading ? 'Starting…' : '▶ Preview App'}</span>
+                        </button>
+                      )
+                    )}
                   </div>
                 </div>
+
+                {previewError && (
+                  <div className="px-3 py-2 rounded bg-rose-950/20 border border-rose-500/30 text-[11px] text-rose-400">
+                    Preview failed to start: {previewError}
+                  </div>
+                )}
 
                 {/* Progress Bar */}
                 <div className="w-full bg-[#161B22] h-2 rounded-full overflow-hidden border border-[#30363D]">
@@ -995,14 +1053,17 @@ export const DashboardView: React.FC = () => {
 
       {/* Phase Inspector Modal */}
       <PhaseInspectorModal
-        phase={selectedPhaseForInspection}
-        isOpen={isPhaseInspectorOpen}
-        onClose={handleClosePhaseInspector}
-        projectName={projectName}
-        contextDocs={contextDocs}
-        analysisId={analysisId}
-        onRerunSecurityChecks={handleRerunSecurityChecks}
-      />
+  phase={selectedPhaseForInspection}
+  isOpen={isPhaseInspectorOpen}
+  onClose={handleClosePhaseInspector}
+  projectName={projectName}
+  contextDocs={contextDocs}
+  analysisId={analysisId}
+  onRerunSecurityChecks={handleRerunSecurityChecks}
+  onOpenPreview={handleStartPreview}
+  previewLoading={previewLoading}
+  previewError={previewError}
+/>
     </div>
   );
 };
