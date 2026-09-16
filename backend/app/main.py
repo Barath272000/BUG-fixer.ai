@@ -106,6 +106,7 @@ def create_app() -> FastAPI:
     from app.modules.credentials.router import router as credentials_router
     from app.modules.analytics.router import router as analytics_router
     from app.modules.preview.router import router as preview_router
+    from app.modules.github.router import router as github_router
     from app.modules.realtime.router import router as realtime_router
 
     app.include_router(auth_router, prefix="/api/v1")
@@ -121,6 +122,7 @@ def create_app() -> FastAPI:
     app.include_router(credentials_router, prefix="/api/v1")
     app.include_router(analytics_router, prefix="/api/v1")
     app.include_router(preview_router, prefix="/api/v1")
+    app.include_router(github_router, prefix="/api/v1")
     app.include_router(realtime_router)  # no /api/v1 prefix: ws(s)://host/realtime
 
     # The following modules are converted in later phases and will be

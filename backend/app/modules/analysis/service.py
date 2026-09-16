@@ -1,7 +1,7 @@
 """Mirrors: backend/src/modules/analysis/analysis.service.ts"""
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -181,3 +181,48 @@ async def list_recent_analyses(db: AsyncSession, owner_id: str, limit: int = 20)
     ).scalar_one()
 
     return {"items": items, "stats": {"totalRuns": total_runs, "fixed": fixed, "failed": failed}}
+
+
+async def count_analysis_runs(db: AsyncSession, owner_id: str, project_id: str) -> int:
+    await _assert_project_access(db, owner_id, project_id)
+    return (
+        await db.execute(
+            select(func.count()).select_from(AnalysisRun).where(AnalysisRun.projectId == project_id)
+        )
+    ).scalar_one()
+
+
+async def clear_analysis_runs(db: AsyncSession, owner_id: str, project_id: str) -> int:
+    """Deletes every AnalysisRun (pipeline execution) for a project — this is
+    what the Dashboard's "Recent Runs" panel and the header's run/phase
+    counters read from.
+
+    FK cascades take care of the rest: PipelineLog and PipelinePhase rows
+    (ondelete=CASCADE) and each run's recorded TestRun results
+    (ondelete=CASCADE) go with it. Bug and FixProposal rows are NOT deleted —
+    their analysisRunId FK is ondelete=SET NULL, so bugs/fixes survive with
+    their "which run found this" link cleared. Clear those separately via
+    clear_bugs()/clear_fix_history() if that's also wanted.
+    """
+    await _assert_project_access(db, owner_id, project_id)
+    count = (
+        await db.execute(
+            select(func.count()).select_from(AnalysisRun).where(AnalysisRun.projectId == project_id)
+        )
+    ).scalar_one()
+    await db.execute(delete(AnalysisRun).where(AnalysisRun.projectId == project_id))
+    await db.commit()
+    return count
+
+
+async def clear_all_analysis_runs(db: AsyncSession, owner_id: str) -> int:
+    """Deletes every analysis run visible in the Dashboard's Recent Runs panel."""
+    project_ids = select(Project.id).where(Project.ownerId == owner_id)
+    count = (
+        await db.execute(
+            select(func.count()).select_from(AnalysisRun).where(AnalysisRun.projectId.in_(project_ids))
+        )
+    ).scalar_one()
+    await db.execute(delete(AnalysisRun).where(AnalysisRun.projectId.in_(project_ids)))
+    await db.commit()
+    return count

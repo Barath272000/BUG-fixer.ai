@@ -12,6 +12,9 @@ from app.modules.analysis.schemas import (
 )
 from app.modules.analysis.service import (
     cancel_analysis,
+    clear_all_analysis_runs,
+    clear_analysis_runs,
+    count_analysis_runs,
     create_analysis,
     get_analysis,
     list_analyses,
@@ -29,6 +32,16 @@ async def recent(
 ):
     result = await list_recent_analyses(db, current_user.id)
     return result
+
+
+@router.delete("/recent")
+async def clear_recent(
+    current_user: AuthUser = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    """Deletes all analysis history shown by the Dashboard's Recent Runs panel."""
+    count = await clear_all_analysis_runs(db, current_user.id)
+    return {"deleted": count}
 
 
 @router.post("/projects/{project_id}/run", response_model=AnalysisRunOut, status_code=202)
@@ -49,6 +62,30 @@ async def list_(
 ):
     runs = await list_analyses(db, current_user.id, project_id)
     return [AnalysisRunOut.model_validate(r) for r in runs]
+
+
+@router.get("/projects/{project_id}/count")
+async def count(
+    project_id: str,
+    current_user: AuthUser = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    count = await count_analysis_runs(db, current_user.id, project_id)
+    return {"count": count}
+
+
+@router.delete("/projects/{project_id}")
+async def clear(
+    project_id: str,
+    current_user: AuthUser = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    """Deletes a project's analysis run history — what the Dashboard's
+    "Recent Runs" panel reads from. Bugs/fixes are kept (see
+    clear_analysis_runs docstring); their recorded test results go with
+    the run since TestRun.analysisRunId cascades."""
+    count = await clear_analysis_runs(db, current_user.id, project_id)
+    return {"deleted": count}
 
 
 @router.get("/{analysis_id}", response_model=AnalysisRunDetailOut)

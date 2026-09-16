@@ -89,11 +89,12 @@ function formatDuration(ms: number): string {
 
 
 interface DashboardViewProps {
+  refreshToken?: number;
   onAnalysisDataChanged: (projectId: string) => void;
   onAnalysisCompleted: (analysisRunId: string, projectName: string) => void;
 }
 
-export const DashboardView: React.FC<DashboardViewProps> = ({ onAnalysisDataChanged, onAnalysisCompleted }) => {
+export const DashboardView: React.FC<DashboardViewProps> = ({ refreshToken, onAnalysisDataChanged, onAnalysisCompleted }) => {
   const [activeUploadTab, setActiveUploadTab] = useState<'zip' | 'github' | 'paste'>('zip');
   const [projectName, setProjectName] = useState('');
   const [activeRightTab, setActiveRightTab] = useState<'pipeline' | 'logs'>('pipeline');
@@ -159,7 +160,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ onAnalysisDataChan
 
   useEffect(() => {
     refreshRecentRuns();
-  }, [refreshRecentRuns]);
+  }, [refreshRecentRuns, refreshToken]);
 
   // --- GitHub tab state ---
   const [githubUrl, setGithubUrl] = useState('');

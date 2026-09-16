@@ -32,6 +32,7 @@ export default function App() {
   const [currentModel, setCurrentModel] = useState('GPT-4-Turbo');
   const [activeModelBackend, setActiveModelBackend] = useState<{ provider: string; model: string } | null>(null);
   const [fixHistoryRefreshToken, setFixHistoryRefreshToken] = useState(0);
+  const [dashboardRefreshToken, setDashboardRefreshToken] = useState(0);
   const quotaAlertsRef = React.useRef(new Set<string>());
 
   // --- Notifications (starts empty — populated from real events as they happen) ---
@@ -289,6 +290,7 @@ export default function App() {
         <main className="flex-1 flex flex-col bg-[#0B0E14] overflow-hidden min-w-0">
           {activeTab === 'dashboard' && (
             <DashboardView
+              refreshToken={dashboardRefreshToken}
               onAnalysisDataChanged={handleAnalysisDataChanged}
               onAnalysisCompleted={handleAnalysisCompleted}
             />
@@ -325,7 +327,12 @@ export default function App() {
 
           {activeTab === 'docs' && <DocsView />}
 
-          {activeTab === 'settings' && <SettingsView projectId={projectId} />}
+          {activeTab === 'settings' && (
+            <SettingsView
+              projectId={projectId}
+              onHistoryChanged={() => setDashboardRefreshToken((value) => value + 1)}
+            />
+          )}
         </main>
 
       </div>

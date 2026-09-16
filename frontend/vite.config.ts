@@ -9,7 +9,7 @@ export default defineConfig({
     tailwindcss(),
   ],
   server: {
-    port: 5173,
+    port: 3000,
     host: '0.0.0.0',
     // Vite 6+ rejects requests whose Host header it doesn't recognize.
     // Codespaces/devcontainer forwarding uses a rotating *.app.github.dev
@@ -26,15 +26,23 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:4000',
         changeOrigin: true,
+        secure: false,
+        timeout: 60000,
+        proxyTimeout: 60000,
       },
       '/health': {
         target: 'http://localhost:4000',
         changeOrigin: true,
+        secure: false,
+        timeout: 60000,
+        proxyTimeout: 60000,
       },
       '/realtime': {
         target: 'ws://localhost:4000',
         ws: true,
         changeOrigin: true,
+        timeout: 60000,
+        proxyTimeout: 60000,
       },
     },
   }

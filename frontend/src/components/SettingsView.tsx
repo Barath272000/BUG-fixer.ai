@@ -20,6 +20,7 @@ import { apiRequest, ApiError } from '../api/client';
 import { clearBugs } from '../api/bugs';
 import { clearFixHistory } from '../api/fixes';
 import { fetchAnalytics, clearAnalyticsTestRuns } from '../api/analytics';
+import { countAnalysisRuns, clearRecentAnalysisRuns } from '../api/analysis';
 import { getRecentFiles, clearRecentFiles } from '../utils/recentFiles';
 
 // UI model choice <-> backend (provider, model) pair.
@@ -45,6 +46,7 @@ function modelIdFor(provider: string, model: string): string {
 
 interface SettingsViewProps {
   projectId: string | null;
+  onHistoryChanged?: () => void;
 }
 
 type ClearActionType = 'recent' | 'bugs' | 'fixes' | 'tests' | 'all';
@@ -56,7 +58,7 @@ interface ConfirmModalState {
   actionLabel: string;
 }
 
-export const SettingsView: React.FC<SettingsViewProps> = ({ projectId }) => {
+export const SettingsView: React.FC<SettingsViewProps> = ({ projectId, onHistoryChanged }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -69,6 +71,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ projectId }) => {
 
   // --- Data Management & Storage Cleanup ---
   const [recentFilesCount, setRecentFilesCount] = useState(0);
+  const [analysisRunCount, setAnalysisRunCount] = useState<number | null>(null);
   const [bugCount, setBugCount] = useState<number | null>(null);
   const [fixCount, setFixCount] = useState<number | null>(null);
   const [testRunCount, setTestRunCount] = useState<number | null>(null);
@@ -89,10 +92,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ projectId }) => {
     setDataLoading(true);
     setDataError(null);
     try {
-      const analytics = await fetchAnalytics(projectId);
+      const [analytics, runCount] = await Promise.all([
+        fetchAnalytics(projectId),
+        countAnalysisRuns(projectId),
+      ]);
       setBugCount(analytics.bugsDetected);
       setFixCount(analytics.fixesGenerated);
       setTestRunCount(analytics.testRunCount);
+      setAnalysisRunCount(runCount);
     } catch (err) {
       setDataError(err instanceof ApiError ? err.message : 'Failed to load data usage');
     } finally {
@@ -131,7 +138,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ projectId }) => {
     try {
       if (actionType === 'recent') {
         const cleared = clearRecentFiles(projectId);
-        showToast(`Cleared ${cleared} recent file${cleared === 1 ? '' : 's'} from this browser`);
+        const clearedRuns = await clearRecentAnalysisRuns();
+        setRecentFilesCount(0);
+        setAnalysisRunCount(0);
+        onHistoryChanged?.();
+        showToast(`Cleared ${cleared} recent file${cleared === 1 ? '' : 's'} from this browser and ${clearedRuns} analysis run${clearedRuns === 1 ? '' : 's'} (incl. their test results)`);
       } else if (actionType === 'bugs') {
         const deleted = await clearBugs(projectId);
         showToast(`Cleared ${deleted} bug${deleted === 1 ? '' : 's'} (and their fix history)`);
@@ -143,11 +154,17 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ projectId }) => {
         showToast(`Cleared ${deleted} test run record${deleted === 1 ? '' : 's'}`);
       } else if (actionType === 'all') {
         const clearedRecent = clearRecentFiles(projectId);
-        const [deletedBugs, deletedTests] = await Promise.all([
+        const [deletedBugs, deletedTests, deletedRuns] = await Promise.all([
           clearBugs(projectId),
           clearAnalyticsTestRuns(projectId),
+          clearRecentAnalysisRuns(),
         ]);
-        showToast(`Purged ${deletedBugs} bug${deletedBugs === 1 ? '' : 's'}, ${deletedTests} test run record${deletedTests === 1 ? '' : 's'}, and ${clearedRecent} recent file${clearedRecent === 1 ? '' : 's'}`);
+        setRecentFilesCount(0);
+        setAnalysisRunCount(0);
+        setBugCount(0);
+        setTestRunCount(0);
+        onHistoryChanged?.();
+        showToast(`Purged ${deletedBugs} bug${deletedBugs === 1 ? '' : 's'}, ${deletedTests} test run record${deletedTests === 1 ? '' : 's'}, ${deletedRuns} analysis run${deletedRuns === 1 ? '' : 's'}, and ${clearedRecent} recent file${clearedRecent === 1 ? '' : 's'}`);
       }
       await loadDataCounts();
     } catch (err) {
@@ -259,23 +276,30 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ projectId }) => {
                     </div>
                     <span className="font-semibold text-sm text-white">Recent History &amp; Cache</span>
                   </div>
-                  <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-semibold ${
-                    recentFilesCount > 0 ? 'bg-blue-500/20 text-blue-300' : 'bg-gray-800 text-gray-400'
-                  }`}>
-                    {recentFilesCount} Recent File{recentFilesCount === 1 ? '' : 's'}
-                  </span>
+                  <div className="flex items-center gap-1.5">
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-semibold ${
+                      recentFilesCount > 0 ? 'bg-blue-500/20 text-blue-300' : 'bg-gray-800 text-gray-400'
+                    }`}>
+                      {recentFilesCount} Recent File{recentFilesCount === 1 ? '' : 's'}
+                    </span>
+                    <span className={`px-2 py-0.5 rounded text-[10px] font-mono font-semibold ${
+                      (analysisRunCount ?? 0) > 0 ? 'bg-blue-500/20 text-blue-300' : 'bg-gray-800 text-gray-400'
+                    }`}>
+                      {dataLoading ? '…' : `${analysisRunCount ?? 0} Run${(analysisRunCount ?? 0) === 1 ? '' : 's'}`}
+                    </span>
+                  </div>
                 </div>
                 <p className="text-xs text-gray-400 leading-relaxed">
-                  Clears the Workspace IDE&apos;s recently-opened files list. This is stored only in this browser, not on the server.
+                  Clears the Workspace IDE&apos;s recently-opened files list (stored only in this browser) <strong className="text-gray-300">and</strong> this project&apos;s analysis run history shown on the Dashboard&apos;s Recent Runs panel — including the test results recorded under those runs. Bugs and AI fixes themselves are kept; use the cards below to clear those.
                 </p>
               </div>
 
               <div className="pt-3 border-t border-[#21262D] flex items-center justify-end">
                 <button
-                  disabled={!recentFilesCount || clearingAction !== null}
+                  disabled={clearingAction !== null}
                   onClick={() => setConfirmModal({
-                    title: 'Clear Recent File History?',
-                    description: `This will remove all ${recentFilesCount} recently-opened file${recentFilesCount === 1 ? '' : 's'} tracked in this browser for this project.`,
+                    title: 'Clear Recent History & Run Log?',
+                    description: `This will remove all ${recentFilesCount} recently-opened file${recentFilesCount === 1 ? '' : 's'} tracked in this browser, and permanently delete all ${analysisRunCount ?? 0} analysis run${(analysisRunCount ?? 0) === 1 ? '' : 's'} (and their recorded test results) for this project from the Dashboard's Recent Runs history. Bugs and AI fixes are kept.`,
                     actionType: 'recent',
                     actionLabel: 'Clear Recent History',
                   })}
@@ -310,7 +334,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ projectId }) => {
 
               <div className="pt-3 border-t border-[#21262D] flex items-center justify-end">
                 <button
-                  disabled={!bugCount || clearingAction !== null}
+                  disabled={clearingAction !== null}
                   onClick={() => setConfirmModal({
                     title: 'Clear All Bug List Data?',
                     description: `This will permanently delete all ${bugCount ?? 0} bugs in this project, along with their AI fix history. This cannot be undone.`,
@@ -348,7 +372,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ projectId }) => {
 
               <div className="pt-3 border-t border-[#21262D] flex items-center justify-end">
                 <button
-                  disabled={!fixCount || clearingAction !== null}
+                  disabled={clearingAction !== null}
                   onClick={() => setConfirmModal({
                     title: 'Clear AI Fix History Data?',
                     description: `This will permanently delete all ${fixCount ?? 0} AI-generated fix records in this project. This cannot be undone.`,
@@ -386,7 +410,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ projectId }) => {
 
               <div className="pt-3 border-t border-[#21262D] flex items-center justify-end">
                 <button
-                  disabled={!testRunCount || clearingAction !== null}
+                  disabled={clearingAction !== null}
                   onClick={() => setConfirmModal({
                     title: 'Clear Analytical Report Data?',
                     description: `This will permanently delete all ${testRunCount ?? 0} recorded test runs for this project. This cannot be undone.`,
@@ -414,17 +438,17 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ projectId }) => {
               <div>
                 <div className="text-xs font-bold text-white">Master Data Cleanup</div>
                 <div className="text-[11px] text-gray-400">
-                  Wipe all recent history, bugs, AI fix history, and test run data for this project in one action.
+                  Wipe all recent history, analysis run history, bugs, AI fix history, and test run data for this project in one action.
                 </div>
               </div>
             </div>
 
             <div className="flex items-center gap-2 shrink-0">
               <button
-                disabled={clearingAction !== null || (!bugCount && !fixCount && !testRunCount && !recentFilesCount)}
+                disabled={clearingAction !== null}
                 onClick={() => setConfirmModal({
                   title: 'Purge All Project Data?',
-                  description: `Warning: this will delete all ${bugCount ?? 0} bugs (and their fix history), ${testRunCount ?? 0} test runs, and ${recentFilesCount} recent file${recentFilesCount === 1 ? '' : 's'} for this project in one action. This cannot be undone.`,
+                  description: `Warning: this will delete all ${bugCount ?? 0} bugs (and their fix history), ${testRunCount ?? 0} test runs, ${analysisRunCount ?? 0} analysis run${(analysisRunCount ?? 0) === 1 ? '' : 's'}, and ${recentFilesCount} recent file${recentFilesCount === 1 ? '' : 's'} for this project in one action. This cannot be undone.`,
                   actionType: 'all',
                   actionLabel: 'Purge Everything',
                 })}
