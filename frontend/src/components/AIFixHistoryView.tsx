@@ -1,7 +1,22 @@
 import React, { useState } from 'react';
 import { History, Sparkles, Search, ExternalLink } from 'lucide-react';
+import {
+  ResponsiveContainer,
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  Tooltip,
+  BarChart,
+  Bar,
+  Cell,
+  CartesianGrid,
+} from 'recharts';
 import { fetchFixHistory, fetchFixSummary } from '../api/fixes';
 import { AIFixHistoryItem, FixSummary } from '../types';
+
+// Same indigo/green/amber/red palette used elsewhere in the AI Fix History design.
+const MODEL_BAR_COLORS = ['#6366f1', '#22c55e', '#f59e0b', '#ef4444', '#06b6d4', '#a855f7'];
 
 interface AIFixHistoryViewProps {
   refreshToken: number;
@@ -41,6 +56,36 @@ export const AIFixHistoryView: React.FC<AIFixHistoryViewProps> = ({ refreshToken
       }
     })();
   }, [refreshToken]);
+
+  // "Suggestions Over Time" — generated vs applied fixes, grouped by date.
+  const timelineData = React.useMemo(() => {
+    const byDate = new Map<string, { date: string; generated: number; applied: number }>();
+    for (const item of historyItems) {
+      const row = byDate.get(item.date) ?? { date: item.date, generated: 0, applied: 0 };
+      row.generated += 1;
+      if (item.status === 'Applied') row.applied += 1;
+      byDate.set(item.date, row);
+    }
+    return Array.from(byDate.values()).sort((a, b) => a.date.localeCompare(b.date));
+  }, [historyItems]);
+
+  // "Acceptance Rate by Model" — same bar-chart design as the severity-based
+  // version, but grouped by AI model since fix history doesn't carry the
+  // originating bug's severity.
+  const modelAcceptanceData = React.useMemo(() => {
+    const byModel = new Map<string, { model: string; total: number; applied: number }>();
+    for (const item of historyItems) {
+      const row = byModel.get(item.model) ?? { model: item.model, total: 0, applied: 0 };
+      row.total += 1;
+      if (item.status === 'Applied') row.applied += 1;
+      byModel.set(item.model, row);
+    }
+    return Array.from(byModel.values()).map((row, index) => ({
+      model: row.model,
+      rate: row.total > 0 ? Math.round((row.applied / row.total) * 100) : 0,
+      color: MODEL_BAR_COLORS[index % MODEL_BAR_COLORS.length],
+    }));
+  }, [historyItems]);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'Applied' | 'Ready' | 'Superseded'>('ALL');
@@ -113,6 +158,74 @@ export const AIFixHistoryView: React.FC<AIFixHistoryViewProps> = ({ refreshToken
           <div className="text-2xl font-bold text-white">~{hoursSaved} hrs</div>
           <div className="text-[11px] text-gray-500">
             {summary ? `est. $${summary.estimatedDollarsSaved.toLocaleString()} saved` : '—'}
+          </div>
+        </div>
+      </div>
+
+      {/* 2 Visual Charts */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="rounded-lg bg-[#0D1117] border border-[#30363D] p-5 space-y-3 shadow-sm">
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-xs font-bold text-gray-200 uppercase tracking-wider">
+                Suggestions Over Time
+              </h2>
+              <p className="text-[11px] text-gray-400">Daily AI suggestions generated vs applied</p>
+            </div>
+            <div className="flex items-center gap-3 text-xs">
+              <span className="flex items-center gap-1 text-indigo-400">
+                <span className="w-2 h-2 rounded-full bg-indigo-500" /> Generated
+              </span>
+              <span className="flex items-center gap-1 text-green-400">
+                <span className="w-2 h-2 rounded-full bg-green-500" /> Applied
+              </span>
+            </div>
+          </div>
+
+          <div className="h-44 w-full">
+            {timelineData.length > 0 ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={timelineData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#21262D" vertical={false} />
+                  <XAxis dataKey="date" stroke="#6b7280" tick={{ fontSize: 10 }} />
+                  <YAxis stroke="#6b7280" tick={{ fontSize: 10 }} allowDecimals={false} />
+                  <Tooltip contentStyle={{ backgroundColor: '#161B22', borderColor: '#30363D', borderRadius: '6px', fontSize: '11px' }} />
+                  <Area type="monotone" dataKey="generated" stroke="#6366f1" strokeWidth={2} fill="#6366f1" fillOpacity={0.2} />
+                  <Area type="monotone" dataKey="applied" stroke="#22c55e" strokeWidth={2} fill="#22c55e" fillOpacity={0.2} />
+                </AreaChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="h-full flex items-center justify-center text-xs text-gray-500">No fix history yet</div>
+            )}
+          </div>
+        </div>
+
+        <div className="rounded-lg bg-[#0D1117] border border-[#30363D] p-5 space-y-3 shadow-sm">
+          <div>
+            <h2 className="text-xs font-bold text-gray-200 uppercase tracking-wider">
+              Acceptance Rate by Model
+            </h2>
+            <p className="text-[11px] text-gray-400">% of AI-generated fixes applied, per model</p>
+          </div>
+
+          <div className="h-44 w-full">
+            {modelAcceptanceData.length > 0 ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={modelAcceptanceData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#21262D" vertical={false} />
+                  <XAxis dataKey="model" stroke="#6b7280" tick={{ fontSize: 10 }} />
+                  <YAxis stroke="#6b7280" tick={{ fontSize: 10 }} unit="%" allowDecimals={false} />
+                  <Tooltip contentStyle={{ backgroundColor: '#161B22', borderColor: '#30363D', borderRadius: '6px', fontSize: '11px' }} />
+                  <Bar dataKey="rate" radius={[4, 4, 0, 0]} barSize={32}>
+                    {modelAcceptanceData.map((entry, index) => (
+                      <Cell key={`cell-${index}`} fill={entry.color} />
+                    ))}
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="h-full flex items-center justify-center text-xs text-gray-500">No fix history yet</div>
+            )}
           </div>
         </div>
       </div>
