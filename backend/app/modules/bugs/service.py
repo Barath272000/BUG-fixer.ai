@@ -1,5 +1,5 @@
 """Mirrors: backend/src/modules/bugs/{bug.service,bug.repository}.ts"""
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -190,6 +190,20 @@ async def create_bug_from_error(db: AsyncSession, project: Project, error: Error
     ))
     await db.commit()
     return bug
+
+
+async def clear_bugs(db: AsyncSession, owner_id: str, project_id: str) -> int:
+    """Deletes every Bug in a project. FK cascades (ondelete=CASCADE) take care
+    of BugOccurrence and FixProposal rows automatically, so a project's fix
+    history disappears along with its bugs by design.
+    """
+    await _assert_project_access(db, owner_id, project_id)
+    count = (
+        await db.execute(select(func.count()).select_from(Bug).where(Bug.projectId == project_id))
+    ).scalar_one()
+    await db.execute(delete(Bug).where(Bug.projectId == project_id))
+    await db.commit()
+    return count
 
 
 async def update_bug(db: AsyncSession, owner_id: str, bug_id: str, payload: UpdateBugRequest) -> Bug:

@@ -5,8 +5,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.common.middleware.auth import AuthUser, require_auth
 from app.db.session import get_db
 from app.modules.fixes.schemas import FixOut, GenerateFixRequest, ValidateFixRequest
-from app.modules.fixes.service import apply_fix, generate_fix, get_fix, list_fixes, revert_fix, validate_fix
-from app.modules.fixes.service import apply_fix, generate_fix, get_fix, get_fix_summary, list_fixes, revert_fix, validate_fix
+from app.modules.fixes.service import (
+    apply_fix,
+    clear_fix_history,
+    generate_fix,
+    get_fix,
+    get_fix_summary,
+    list_fixes,
+    revert_fix,
+    validate_fix,
+)
+
 router = APIRouter(prefix="/fixes", tags=["fixes"])
 
 
@@ -18,9 +27,6 @@ async def summary(
     return await get_fix_summary(db, current_user.id)
 
 
-@router.get("/{fix_id}", response_model=FixOut)
-
-
 @router.get("/history", response_model=list[FixOut])
 async def history(
     analysis_run_id: str | None = Query(default=None, alias="analysisRunId"),
@@ -29,6 +35,16 @@ async def history(
 ):
     fixes = await list_fixes(db, current_user.id, analysis_run_id)
     return [FixOut.model_validate(f) for f in fixes]
+
+
+@router.delete("/history")
+async def clear_history(
+    projectId: str,
+    current_user: AuthUser = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    count = await clear_fix_history(db, current_user.id, projectId)
+    return {"deleted": count}
 
 
 @router.get("/{fix_id}", response_model=FixOut)

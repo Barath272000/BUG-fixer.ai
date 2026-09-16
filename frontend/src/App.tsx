@@ -325,7 +325,7 @@ export default function App() {
 
           {activeTab === 'docs' && <DocsView />}
 
-          {activeTab === 'settings' && <SettingsView />}
+          {activeTab === 'settings' && <SettingsView projectId={projectId} />}
         </main>
 
       </div>

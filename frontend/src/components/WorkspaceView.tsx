@@ -45,6 +45,7 @@ import {
   createWorkspaceFolder,
 } from '../api/workspace';
 import { ApiError } from '../api/client';
+import { addRecentFile } from '../utils/recentFiles';
 import { AgentPanel } from './Agentpanel';
 import { IdeMenuBar } from './IdeMenuBar';
 
@@ -163,6 +164,7 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
   // --- Open files / editor state ---
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([]);
   const [activePath, setActivePath] = useState<string | null>(null);
+  const [openEditorsCollapsed, setOpenEditorsCollapsed] = useState(false);
   const [fileLoading, setFileLoading] = useState(false);
   const [fileError, setFileError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -417,6 +419,7 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
         ...prev,
         { path, content: result.content, savedContent: result.content },
       ]);
+      addRecentFile(projectId, path);
     } catch (err) {
       setFileError(err instanceof ApiError ? err.message : 'Failed to open file.');
     } finally {
@@ -1023,6 +1026,61 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
               </button>
             </div>
           </div>
+
+          {openFiles.length > 0 && (
+            <div className="border-b border-[#333333] shrink-0">
+              <button
+                onClick={() => setOpenEditorsCollapsed(v => !v)}
+                className="w-full flex items-center gap-1 px-3 py-1.5 text-[11px] font-bold tracking-wider uppercase text-[#BBBBBB] hover:text-white"
+              >
+                {openEditorsCollapsed ? (
+                  <ChevronRight className="w-3 h-3" />
+                ) : (
+                  <ChevronDown className="w-3 h-3" />
+                )}
+                <span>Open Editors</span>
+                <span className="ml-auto text-[10px] font-normal normal-case text-[#858585]">
+                  {openFiles.length}
+                </span>
+              </button>
+
+              {!openEditorsCollapsed && (
+                <div className="pb-1">
+                  {openFiles.map(file => {
+                    const active = activePath === file.path;
+                    const dirty = isDirty(file);
+                    const name = file.path.split('/').pop() ?? file.path;
+                    return (
+                      <div
+                        key={file.path}
+                        onClick={() => setActivePath(file.path)}
+                        className={`group flex items-center gap-1.5 pl-6 pr-2 py-[3px] cursor-pointer text-[13px] ${
+                          active
+                            ? 'bg-[#37373D] text-white'
+                            : 'text-[#CCCCCC] hover:bg-[#2A2D2E]'
+                        }`}
+                        title={file.path}
+                      >
+                        <FileCode className={`w-3.5 h-3.5 shrink-0 ${fileIconColor(name)}`} />
+                        <span className={`truncate italic font-mono ${dirty ? '' : ''}`}>{name}</span>
+                        {dirty ? (
+                          <span className="ml-auto w-1.5 h-1.5 rounded-full bg-white shrink-0 group-hover:hidden" />
+                        ) : null}
+                        <button
+                          onClick={e => closeFile(file.path, e)}
+                          className={`shrink-0 hover:bg-[#3C3C3C] p-0.5 rounded text-[#858585] hover:text-white ${
+                            dirty ? 'hidden group-hover:block ml-auto' : 'hidden group-hover:block ml-auto'
+                          }`}
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
 
           <div
             ref={explorerTreeRef}

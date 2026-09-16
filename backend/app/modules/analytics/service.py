@@ -1,5 +1,5 @@
 from collections import Counter
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -64,9 +64,30 @@ async def get_project_analytics(db: AsyncSession, user_id: str, project_id: str)
         "testPassRate": test_pass_rate,
         "bugsDetected": len(bugs),
         "fixesGenerated": len(fixes),
+        "testRunCount": len(tests),
         "aiComputeCost": None,
         "costTracked": False,
         "rootCauses": dict(root_causes),
         "mttrTrend": [],
         "timeline": timeline,
     }
+
+
+async def clear_project_tests(db: AsyncSession, user_id: str, project_id: str) -> int:
+    """Deletes TestRun records for a project — the one piece of analytics
+    data (test pass rate) that isn't already owned by the Bug or Fix
+    History cards. Bug/fix-derived metrics (MTTR, bugs detected, fixes
+    generated) are cleared by those cards instead, since they come
+    straight from the Bug/FixProposal tables."""
+    project = (
+        await db.execute(select(Project).where(Project.id == project_id, Project.ownerId == user_id))
+    ).scalar_one_or_none()
+    if project is None:
+        raise AppError(404, "PROJECT_NOT_FOUND", "Project was not found")
+
+    count = (
+        await db.execute(select(func.count()).select_from(TestRun).where(TestRun.projectId == project_id))
+    ).scalar_one()
+    await db.execute(delete(TestRun).where(TestRun.projectId == project_id))
+    await db.commit()
+    return count

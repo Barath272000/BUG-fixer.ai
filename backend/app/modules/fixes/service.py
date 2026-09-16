@@ -1,5 +1,5 @@
 """Mirrors: backend/src/modules/fixes/fix.service.ts"""
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -112,6 +112,25 @@ async def get_fix_summary(db: AsyncSession, user_id: str) -> dict:
         "acceptanceRate": acceptance_rate,
         "estimatedDollarsSaved": estimated_dollars_saved,
     }
+
+async def clear_fix_history(db: AsyncSession, user_id: str, project_id: str) -> int:
+    """Deletes every FixProposal for a project, leaving its bugs in place.
+    FixValidation rows cascade automatically (ondelete=CASCADE)."""
+    project = (
+        await db.execute(select(Project).where(Project.id == project_id, Project.ownerId == user_id))
+    ).scalar_one_or_none()
+    if project is None:
+        raise AppError(404, "PROJECT_NOT_FOUND", "Project was not found")
+
+    count = (
+        await db.execute(
+            select(func.count()).select_from(FixProposal).where(FixProposal.projectId == project_id)
+        )
+    ).scalar_one()
+    await db.execute(delete(FixProposal).where(FixProposal.projectId == project_id))
+    await db.commit()
+    return count
+
 
 async def validate_fix(db: AsyncSession, user_id: str, fix_id: str, command: str) -> dict:
     fix = await _assert_fix_access(db, user_id, fix_id)

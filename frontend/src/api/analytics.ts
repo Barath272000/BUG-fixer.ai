@@ -12,6 +12,7 @@ export interface AnalyticsResponse {
   testPassRate: number;
   bugsDetected: number;
   fixesGenerated: number;
+  testRunCount: number;
   aiComputeCost: number | null;
   costTracked: boolean;
   rootCauses: Record<string, number>;
@@ -24,4 +25,14 @@ export interface AnalyticsResponse {
 
 export async function fetchAnalytics(projectId: string): Promise<AnalyticsResponse> {
   return apiRequest<AnalyticsResponse>(`/analytics?projectId=${encodeURIComponent(projectId)}`);
+}
+
+/** Deletes recorded test-run data for a project (the one analytics metric
+ * not already owned by the Bug/Fix History cards). Returns the number of
+ * test-run records deleted. */
+export async function clearAnalyticsTestRuns(projectId: string): Promise<number> {
+  const result = await apiRequest<{ deleted: number }>(`/analytics?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'DELETE',
+  });
+  return result.deleted;
 }

@@ -67,3 +67,12 @@ export async function downloadAnalysisFixes(analysisRunId: string, projectName: 
 export async function fetchFixSummary(): Promise<FixSummary> {
   return apiRequest<FixSummary>('/fixes/summary');
 }
+
+/** Deletes every AI fix/patch record for a project, leaving its bugs in
+ * place. Returns the number of fix records deleted. */
+export async function clearFixHistory(projectId: string): Promise<number> {
+  const result = await apiRequest<{ deleted: number }>(`/fixes/history?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'DELETE',
+  });
+  return result.deleted;
+}

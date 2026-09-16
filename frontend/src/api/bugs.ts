@@ -78,6 +78,16 @@ export async function fetchBugs(projectId: string): Promise<Bug[]> {
   return result.items.map(toFrontendBug);
 }
 
+/** Deletes every bug in a project. Also clears that project's AI fix
+ * history, since every fix belongs to exactly one bug. Returns the number
+ * of bugs deleted. */
+export async function clearBugs(projectId: string): Promise<number> {
+  const result = await apiRequest<{ deleted: number }>(`/bugs?projectId=${encodeURIComponent(projectId)}`, {
+    method: 'DELETE',
+  });
+  return result.deleted;
+}
+
 export async function createBugApi(projectId: string, bug: Partial<Bug>): Promise<Bug> {
   const created = await apiRequest<BackendBug>('/bugs', {
     method: 'POST',
