@@ -26,9 +26,11 @@ class ProjectStatus(str, enum.Enum):
 class AnalysisStatus(str, enum.Enum):
     QUEUED = "QUEUED"
     RUNNING = "RUNNING"
+    AWAITING_REVIEW = "AWAITING_REVIEW"  # paused at the Phase 8 preview checkpoint
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
+    NEEDS_HUMAN_REVIEW = "NEEDS_HUMAN_REVIEW"  # loop exhausted max attempts, still failing
 
 
 class PhaseStatus(str, enum.Enum):
@@ -79,6 +81,25 @@ class ProposalStatus(str, enum.Enum):
     APPROVED_AND_APPLIED = "APPROVED_AND_APPLIED"
     REJECTED = "REJECTED"
     REVERTED = "REVERTED"
+
+
+class FixAttemptMode(str, enum.Enum):
+    automatic = "automatic"
+    manual = "manual"
+
+
+class FixAttemptResult(str, enum.Enum):
+    pending = "pending"
+    pass_ = "pass"
+    fail = "fail"
+
+
+class CheckpointStatus(str, enum.Enum):
+    awaiting_decision = "awaiting_decision"
+    previewing = "previewing"
+    resumed = "resumed"
+    rejected = "rejected"
+    timeout = "timeout"
 
 
 class Provider(str, enum.Enum):

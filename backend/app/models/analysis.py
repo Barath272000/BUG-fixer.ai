@@ -31,6 +31,9 @@ class AnalysisRun(Base):
     tests: Mapped[list["TestRun"]] = relationship(back_populates="analysisRun")
     errors: Mapped[list["ErrorRecord"]] = relationship(back_populates="analysisRun")
     fixes: Mapped[list["FixProposal"]] = relationship(back_populates="analysisRun")
+    fixAttempts: Mapped[list["FixAttempt"]] = relationship(back_populates="analysisRun", cascade="all, delete-orphan")
+    checkpoint: Mapped["PreviewCheckpoint | None"] = relationship(back_populates="analysisRun", uselist=False, cascade="all, delete-orphan")
+    maxAttempts: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
 
 
 class PipelinePhase(Base):

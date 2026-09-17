@@ -1,22 +1,29 @@
 """Mirrors: backend/src/jobs/analysis.worker.ts
 
-This is the real pipeline execution logic, called by the Celery task in
-app/workers/celery_app.py. Runs all 8 phases for real:
-  1. Input   - extract uploaded archive into a workspace (GitHub clone: see note below)
-  2. Setup   - detect language/framework
-  3. Sandbox - (implicit; sandbox is created per-command by the Sandbox module)
-  4. Build   - run detected build command in the sandbox
-  5. Test    - run detected test command, parse results, persist TestRun
-  6. Errors  - record build/test failures as ErrorRecord rows
-  7. AI Diagnosis - not run automatically here; triggered on-demand via
-     POST /fixes/generate for a specific bug (matches the Node version's
-     design: AI diagnosis is bug-scoped, not run blindly for the whole project)
-  8. AI Patch - same as above, via POST /fixes/{id}/apply
+Pipeline v2 (10-phase architecture). Execution order now matches
+phase_manager.PIPELINE_DEFINITIONS / the frontend dashboard exactly:
 
-HONEST GAP: GitHub-sourced projects (sourceType == GITHUB) will fail with a
-clear error here — repository cloning + GitHub OAuth token storage
-(git.service.ts / integrations/github/github.service.ts) haven't been
-ported yet. ZIP-uploaded projects work end to end.
+  1. Project Input              <- unchanged from the 8-phase engine
+  2. Project Setup               <- unchanged from the 8-phase engine
+  3. Static Analysis              REAL (Job 1: modules/static_analysis)
+  4. Error & Evidence Collection  REUSED, moved from old #6 -> #4. Now only
+     sees Phase 3's static-analysis findings (build/test hasn't run yet at
+     this point in the new order) -- honest scope-down, see Job 3 note below.
+  5. AI Root Cause Analysis       REUSED, moved from old #7 -> #5
+  6. AI Patch Generation          STUB for now (Job 4): reports the same
+     FixProposals phase 5 already generated rather than a second AI call.
+  7. Isolated Environment         REUSED, moved from old #3 -> #7
+  8. Install -> Build -> Run & Test  REUSED (old #4 build + #5 test merged).
+     Preview Checkpoint pause/resume NOT wired yet -- runs straight through
+     (Job 5).
+  9. Regression Check             STUB for now (Job 5): reuses the old
+     disposable-workspace validation as a placeholder.
+  10. Validation & Iteration      STUB for now (Job 6): no loop controller
+     yet, run always completes after one pass -- no retry, no FixAttempt
+     rows created yet.
+
+HONEST GAP: GitHub-sourced projects (sourceType == GITHUB) still fail with
+a clear error at Phase 1 -- unchanged from before, not part of this rewrite.
 """
 import os
 import shutil
@@ -42,6 +49,7 @@ from app.modules.analysis.detectors import detect_build_command, detect_preview,
 from app.modules.analysis.phase_manager import PIPELINE_DEFINITIONS
 from app.modules.analysis.pipeline_service import add_log, set_security_report, set_subprocesses
 from app.modules.code_analysis.project_inspector import inspect_project
+from app.modules.static_analysis.service import run_static_analysis
 from app.modules.bugs.service import create_bug_from_error
 from app.modules.errors.error_collector import record_error
 from app.modules.errors.test_result_parser import parse_generic_test_output
@@ -140,7 +148,7 @@ def _phase_steps(items: list[tuple[str, str, str]]) -> list[dict]:
     ]
 
 
-async def _run_phase3_sandbox_check(
+async def _run_isolated_environment(
     db: AsyncSession,
     gateway: RealtimeGateway,
     analysis_id: str,
@@ -149,7 +157,11 @@ async def _run_phase3_sandbox_check(
     work_root: str,
     language: str | None,
 ) -> None:
-    """Create and exercise the same constrained sandbox used by build/test."""
+    """Phase 7: create and exercise the sandbox used by Phase 8's
+    install/build/run/test. REUSED from the old 8-phase engine's Phase 3
+    (_run_phase3_sandbox_check) -- same function body, moved and renamed to
+    match its new position, since old-Phase-3-immediately-before-Build is
+    the same relative slot as new-Phase-7-immediately-before-Phase-8."""
     result = await run_sandbox(work_root, "test -d /workspace && printf sandbox-ready", language)
     subprocesses = [{
         "id": "sandbox_smoke_test",
@@ -379,87 +391,56 @@ async def run_analysis_pipeline(db: AsyncSession, gateway: RealtimeGateway, anal
                     await add_log(db, gateway, analysis_id, project_id, "INFO", "Project Setup",
                                   f"Preview available: {preview_command} on port {preview_port}", phase.id)
 
-            # Phase 3: create and exercise the isolated execution environment
+            # Phase 3: Static Analysis — REAL (Job 1). Zero-AI-cost linters,
+            # run before the code is ever built/executed.
             if definition["number"] == 3:
-                await _run_phase3_sandbox_check(
-                    db, gateway, analysis_id, project_id, phase, work_root, project.language,
-                )
-                await add_log(db, gateway, analysis_id, project_id, "PASS", "Isolated Environment",
-                              "Sandbox initialized and smoke-tested", phase.id)
+                report = await run_static_analysis(work_root, project.language)
+                subprocesses = [
+                    {
+                        "id": f"lint_{tool['name']}",
+                        "name": f"Run {tool['name']}",
+                        "completed": True,
+                        "status": "completed",
+                        "category": "static-analysis",
+                        "metrics": {"issues": str(tool["issueCount"]), "durationMs": str(tool["durationMs"])},
+                    }
+                    for tool in report["tools"]
+                ]
+                if not report["supported"]:
+                    subprocesses = [{
+                        "id": "unsupported_language",
+                        "name": f"No linters registered for {project.language or 'this language'} yet",
+                        "completed": False,
+                        "status": "pending",
+                        "category": "static-analysis",
+                    }]
+                await set_subprocesses(db, gateway, analysis_id, project_id, phase, subprocesses)
 
-            # Phase 4: build
+                for finding in report["findings"]:
+                    error = await record_error(
+                        db, project_id, finding["message"] or finding["code"] or "Static analysis finding",
+                        analysis_run_id=analysis_id, name=f"{finding['tool']}:{finding['code']}",
+                        file_path=finding.get("file"), line_number=finding.get("line"),
+                        source="static_analysis",
+                    )
+                    await create_bug_from_error(db, project, error)
+
+                if report["supported"]:
+                    await add_log(db, gateway, analysis_id, project_id, "PASS", "Static Analysis",
+                                  f"{len(report['findings'])} finding(s) across {len(report['tools'])} linter(s)", phase.id)
+                else:
+                    await add_log(db, gateway, analysis_id, project_id, "WARN", "Static Analysis",
+                                  f"No linters registered for {project.language or 'this language'} yet — skipped", phase.id)
+
+            # Phase 4: Error & Evidence Collection — REUSED from old Phase 6
+            # (_collect_run_errors, unchanged). Moved from #6 -> #4.
+            # SCOPE NOTE (Job 3 will revisit this): at this point in the new
+            # order only Phase 3's static-analysis findings exist for this
+            # run — Phase 8 (build/run/test) hasn't happened yet, so no
+            # runtime/build errors are available here yet. That's expected
+            # under the new "diagnose from static findings first" design;
+            # flagged as an open item rather than silently assumed final.
             if definition["number"] == 4:
-                language = project.language or "Unknown"
-                subprocesses = _phase_steps([
-                    ("detect_build_command", "Detect build command", "build"),
-                    ("execute_build", "Execute build in sandbox", "build"),
-                    ("capture_build_output", "Capture build output and exit code", "build"),
-                ])
-                await set_subprocesses(db, gateway, analysis_id, project_id, phase, subprocesses)
-                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "detect_build_command", "running")
-                command = await detect_build_command(work_root, language)
-                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "detect_build_command", "completed", {"command": command})
-                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "execute_build", "running")
-                result = await run_sandbox(work_root, command, language)
-                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "execute_build", "completed" if result.code == 0 else "failed", {"durationMs": str(result.duration_ms)})
-                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "capture_build_output", "completed", {"exitCode": str(result.code), "stdoutBytes": str(len(result.stdout)), "stderrBytes": str(len(result.stderr))})
-
-                if result.code != 0:
-                    detail = _command_failure_detail(result)
-                    error = await record_error(
-                        db, project_id, f"Build command failed: {command}",
-                        analysis_run_id=analysis_id, name="BuildError", stack_trace=detail,
-                    )
-                    await create_bug_from_error(db, project, error)
-                    await add_log(db, gateway, analysis_id, project_id, "ERROR", "Install & Build",
-                                  f"Build failed: {detail[:4000]}", phase.id)
-                    raise PipelineError(f"Build failed: {detail[:2000]}")
-
-                await add_log(db, gateway, analysis_id, project_id, "PASS", "Install & Build",
-                              f"Build succeeded with {command}", phase.id)
-
-            # Phase 5: test
-            if definition["number"] == 5:
-                language = project.language or "Unknown"
-                subprocesses = _phase_steps([
-                    ("detect_test_command", "Detect test command", "testing"),
-                    ("execute_tests", "Execute tests in sandbox", "testing"),
-                    ("parse_test_results", "Parse and persist test results", "testing"),
-                ])
-                await set_subprocesses(db, gateway, analysis_id, project_id, phase, subprocesses)
-                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "detect_test_command", "running")
-                command = await detect_test_command(work_root, language)
-                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "detect_test_command", "completed", {"command": command})
-                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "execute_tests", "running")
-                result = await run_sandbox(work_root, command, language)
-                summary = parse_generic_test_output(result.stdout, result.stderr, result.code)
-                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "execute_tests", "completed" if result.code == 0 or summary.status == "NO_TESTS" else "failed", {"durationMs": str(result.duration_ms)})
-
-                db.add(TestRun(
-                    projectId=project_id, analysisRunId=analysis_id, command=command,
-                    status=summary.status, total=summary.total, passed=summary.passed,
-                    failed=summary.failed, skipped=summary.skipped, durationMs=result.duration_ms,
-                    stdout=result.stdout[:100000], stderr=result.stderr[:100000],
-                ))
-                await db.commit()
-                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "parse_test_results", "completed", {"status": summary.status, "total": str(summary.total), "passed": str(summary.passed), "failed": str(summary.failed)})
-
-                if summary.status == "NO_TESTS":
-                    await add_log(db, gateway, analysis_id, project_id, "WARN", "Testing",
-                                  "Test command ran, but the project contains no discovered tests.", phase.id)
-                elif result.code != 0:
-                    detail = _command_failure_detail(result)
-                    error = await record_error(
-                        db, project_id, f"Test command failed: {command}",
-                        analysis_run_id=analysis_id, name="TestFailure", stack_trace=detail,
-                    )
-                    await create_bug_from_error(db, project, error)
-                    await add_log(db, gateway, analysis_id, project_id, "ERROR", "Testing",
-                                  f"Tests failed: {detail[:4000]}", phase.id)
-                    raise PipelineError(f"Tests failed: {detail[:2000]}")
-
-            # Phase 6: consolidate errors from every executable phase into bugs
-            if definition["number"] == 6:
                 subprocesses = _phase_steps([
                     ("load_run_errors", "Load errors from executed phases", "errors"),
                     ("fingerprint_errors", "Fingerprint and deduplicate errors", "errors"),
@@ -471,11 +452,12 @@ async def run_analysis_pipeline(db: AsyncSession, gateway: RealtimeGateway, anal
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "load_run_errors", "completed", {"errors": str(len(errors))})
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "fingerprint_errors", "completed", {"uniqueFingerprints": str(len({error.fingerprint for error in errors}))})
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "sync_bugs", "completed", {"bugsSynchronized": str(len(errors))})
-                await add_log(db, gateway, analysis_id, project_id, "PASS", "Error Collection",
+                await add_log(db, gateway, analysis_id, project_id, "PASS", "Error & Evidence Collection",
                               f"Collected {len(errors)} error(s) and synchronized bug records", phase.id)
 
-            # Phase 7: diagnose this run's bugs and persist fix proposals
-            if definition["number"] == 7:
+            # Phase 5: AI Root Cause Analysis — REUSED from old Phase 7
+            # (_generate_run_fixes, unchanged). Moved from #7 -> #5.
+            if definition["number"] == 5:
                 subprocesses = _phase_steps([
                     ("build_ai_context", "Build source-aware bug context", "ai"),
                     ("generate_diagnoses", "Generate AI root-cause proposals", "ai"),
@@ -485,30 +467,155 @@ async def run_analysis_pipeline(db: AsyncSession, gateway: RealtimeGateway, anal
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "build_ai_context", "running")
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "build_ai_context", "completed")
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "generate_diagnoses", "running")
-                fixes = await _generate_run_fixes(db, project, analysis_id)
-                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "generate_diagnoses", "completed", {"fixes": str(len(fixes))})
-                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "persist_proposals", "completed", {"proposals": str(len(fixes))})
+                run_fixes = await _generate_run_fixes(db, project, analysis_id)
+                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "generate_diagnoses", "completed", {"fixes": str(len(run_fixes))})
+                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "persist_proposals", "completed", {"proposals": str(len(run_fixes))})
                 await add_log(db, gateway, analysis_id, project_id, "PASS", "AI Root Cause Analysis",
-                              f"Generated {len(fixes)} AI fix proposal(s)", phase.id)
+                              f"Generated {len(run_fixes)} AI root-cause diagnosis(es)", phase.id)
 
-            # Phase 8: validate proposals in disposable workspaces. Applying a
-            # patch to the real workspace remains an explicit user action.
+            # Phase 6: AI Patch Generation — STUB (Job 4). generate_fix()
+            # already produces a full unified diff as part of Phase 5's
+            # call, so for now this phase just reports on those same
+            # proposals instead of making a second AI call. Job 4 will
+            # split diagnosis and patch synthesis into two real, separate
+            # steps and add the old-vs-new attempt diff comparison.
+            if definition["number"] == 6:
+                fixes_stmt = select(FixProposal).where(FixProposal.analysisRunId == analysis_id)
+                run_fixes = list((await db.execute(fixes_stmt)).scalars().all())
+                subprocesses = [{
+                    "id": "patch_synthesis_stub",
+                    "name": "Patch synthesis (reusing Phase 5 output — Job 4 pending)",
+                    "completed": True,
+                    "status": "completed",
+                    "category": "ai",
+                    "metrics": {"patches": str(len(run_fixes))},
+                }]
+                await set_subprocesses(db, gateway, analysis_id, project_id, phase, subprocesses)
+                await add_log(db, gateway, analysis_id, project_id, "WARN", "AI Patch Generation",
+                              f"Stub phase: reporting {len(run_fixes)} patch(es) already produced in Phase 5. "
+                              f"Old-vs-new attempt diffing not implemented yet.", phase.id)
+
+            # Phase 7: Isolated Environment — REUSED from old Phase 3
+            # (_run_isolated_environment, unchanged body). Moved from #3 -> #7.
+            if definition["number"] == 7:
+                await _run_isolated_environment(
+                    db, gateway, analysis_id, project_id, phase, work_root, project.language,
+                )
+                await add_log(db, gateway, analysis_id, project_id, "PASS", "Isolated Environment",
+                              "Sandbox initialized and smoke-tested", phase.id)
+
+            # Phase 8: Install -> Build -> Run & Test — REUSED from old
+            # Phase 4 (build) + Phase 5 (test), merged into one phase.
+            # Preview Checkpoint pause/resume NOT wired yet (Job 5) — runs
+            # straight through to completion for now.
             if definition["number"] == 8:
+                language = project.language or "Unknown"
+                subprocesses = _phase_steps([
+                    ("detect_build_command", "Detect build command", "build"),
+                    ("execute_build", "Execute build in sandbox", "build"),
+                    ("capture_build_output", "Capture build output and exit code", "build"),
+                    ("detect_test_command", "Detect test command", "testing"),
+                    ("execute_tests", "Execute tests in sandbox", "testing"),
+                    ("parse_test_results", "Parse and persist test results", "testing"),
+                ])
+                await set_subprocesses(db, gateway, analysis_id, project_id, phase, subprocesses)
+
+                # --- Install & Build ---
+                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "detect_build_command", "running")
+                build_command = await detect_build_command(work_root, language)
+                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "detect_build_command", "completed", {"command": build_command})
+                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "execute_build", "running")
+                build_result = await run_sandbox(work_root, build_command, language)
+                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "execute_build", "completed" if build_result.code == 0 else "failed", {"durationMs": str(build_result.duration_ms)})
+                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "capture_build_output", "completed", {"exitCode": str(build_result.code), "stdoutBytes": str(len(build_result.stdout)), "stderrBytes": str(len(build_result.stderr))})
+
+                if build_result.code != 0:
+                    detail = _command_failure_detail(build_result)
+                    error = await record_error(
+                        db, project_id, f"Build command failed: {build_command}",
+                        analysis_run_id=analysis_id, name="BuildError", stack_trace=detail,
+                    )
+                    await create_bug_from_error(db, project, error)
+                    await add_log(db, gateway, analysis_id, project_id, "ERROR", "Install & Build",
+                                  f"Build failed: {detail[:4000]}", phase.id)
+                    raise PipelineError(f"Build failed: {detail[:2000]}")
+                await add_log(db, gateway, analysis_id, project_id, "PASS", "Install & Build",
+                              f"Build succeeded with {build_command}", phase.id)
+
+                # --- Run & Test ---
+                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "detect_test_command", "running")
+                test_command = await detect_test_command(work_root, language)
+                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "detect_test_command", "completed", {"command": test_command})
+                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "execute_tests", "running")
+                test_result = await run_sandbox(work_root, test_command, language)
+                summary = parse_generic_test_output(test_result.stdout, test_result.stderr, test_result.code)
+                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "execute_tests", "completed" if test_result.code == 0 or summary.status == "NO_TESTS" else "failed", {"durationMs": str(test_result.duration_ms)})
+
+                db.add(TestRun(
+                    projectId=project_id, analysisRunId=analysis_id, command=test_command,
+                    status=summary.status, total=summary.total, passed=summary.passed,
+                    failed=summary.failed, skipped=summary.skipped, durationMs=test_result.duration_ms,
+                    stdout=test_result.stdout[:100000], stderr=test_result.stderr[:100000],
+                ))
+                await db.commit()
+                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "parse_test_results", "completed", {"status": summary.status, "total": str(summary.total), "passed": str(summary.passed), "failed": str(summary.failed)})
+
+                if summary.status == "NO_TESTS":
+                    await add_log(db, gateway, analysis_id, project_id, "WARN", "Testing",
+                                  "Test command ran, but the project contains no discovered tests.", phase.id)
+                elif test_result.code != 0:
+                    detail = _command_failure_detail(test_result)
+                    error = await record_error(
+                        db, project_id, f"Test command failed: {test_command}",
+                        analysis_run_id=analysis_id, name="TestFailure", stack_trace=detail,
+                    )
+                    await create_bug_from_error(db, project, error)
+                    await add_log(db, gateway, analysis_id, project_id, "ERROR", "Testing",
+                                  f"Tests failed: {detail[:4000]}", phase.id)
+                    raise PipelineError(f"Tests failed: {detail[:2000]}")
+
+                # TODO (Job 5): pause here — set run.status = AWAITING_REVIEW,
+                # create a PreviewCheckpoint row, and stop the task instead
+                # of falling through to Phase 9.
+
+            # Phase 9: Regression Check — STUB (Job 5). Reuses the old
+            # disposable-workspace validation (_validate_run_fixes) as a
+            # placeholder for a dedicated full regression suite.
+            if definition["number"] == 9:
+                fixes_stmt = select(FixProposal).where(FixProposal.analysisRunId == analysis_id)
+                run_fixes = list((await db.execute(fixes_stmt)).scalars().all())
                 subprocesses = _phase_steps([
                     ("load_proposals", "Load generated patch proposals", "validation"),
                     ("apply_disposable_patch", "Apply patches to disposable workspace", "validation"),
                     ("run_validation", "Run validation tests in sandbox", "validation"),
                 ])
                 await set_subprocesses(db, gateway, analysis_id, project_id, phase, subprocesses)
-                fixes_stmt = select(FixProposal).where(FixProposal.analysisRunId == analysis_id)
-                fixes = list((await db.execute(fixes_stmt)).scalars().all())
-                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "load_proposals", "completed", {"proposals": str(len(fixes))})
+                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "load_proposals", "completed", {"proposals": str(len(run_fixes))})
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "apply_disposable_patch", "running")
-                validated = await _validate_run_fixes(db, project, fixes)
+                validated = await _validate_run_fixes(db, project, run_fixes)
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "apply_disposable_patch", "completed", {"validated": str(validated)})
-                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "run_validation", "completed", {"validated": str(validated), "proposals": str(len(fixes))})
-                await add_log(db, gateway, analysis_id, project_id, "PASS", "AI Patch & Validation",
-                              f"Validated {validated}/{len(fixes)} proposal(s) in disposable workspaces", phase.id)
+                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "run_validation", "completed", {"validated": str(validated), "proposals": str(len(run_fixes))})
+                await add_log(db, gateway, analysis_id, project_id, "WARN", "Regression Check",
+                              f"Stub phase: validated {validated}/{len(run_fixes)} proposal(s). "
+                              f"Full regression suite (concurrency/DB/contract checks) not implemented yet.", phase.id)
+
+            # Phase 10: Validation & Iteration — STUB (Job 6). No loop
+            # controller yet: the run always completes after one pass, no
+            # FixAttempt rows are created, and the max-attempt / same-error
+            # fingerprint-guard branching described in the frontend design
+            # isn't wired up. Placeholder so the phase renders and the run
+            # still reaches AnalysisStatus.COMPLETED as before.
+            if definition["number"] == 10:
+                subprocesses = [{
+                    "id": "loop_controller_stub",
+                    "name": "Loop controller (Job 6 pending — single-pass only)",
+                    "completed": True,
+                    "status": "completed",
+                    "category": "validation",
+                }]
+                await set_subprocesses(db, gateway, analysis_id, project_id, phase, subprocesses)
+                await add_log(db, gateway, analysis_id, project_id, "WARN", "Validation & Iteration",
+                              "Stub phase: no retry loop yet — this run always ends after one pass.", phase.id)
 
             await _set_phase_status(db, phase, PhaseStatus.COMPLETED)
             await gateway.publish(
