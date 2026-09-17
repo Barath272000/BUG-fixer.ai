@@ -33,6 +33,7 @@ export default function App() {
   const [activeModelBackend, setActiveModelBackend] = useState<{ provider: string; model: string } | null>(null);
   const [fixHistoryRefreshToken, setFixHistoryRefreshToken] = useState(0);
   const [dashboardRefreshToken, setDashboardRefreshToken] = useState(0);
+  const [isAnalyticsCleared, setIsAnalyticsCleared] = useState(false);
   const quotaAlertsRef = React.useRef(new Set<string>());
 
   // --- Notifications (starts empty — populated from real events as they happen) ---
@@ -323,7 +324,12 @@ export default function App() {
             />
           )}
 
-            {activeTab === 'analytics' && <AnalyticsView projectId={projectId} />}
+            {activeTab === 'analytics' && (
+              <AnalyticsView
+                isCleared={isAnalyticsCleared}
+                onResetAnalytics={() => setIsAnalyticsCleared(false)}
+              />
+            )}
 
           {activeTab === 'docs' && <DocsView />}
 
@@ -331,6 +337,7 @@ export default function App() {
             <SettingsView
               projectId={projectId}
               onHistoryChanged={() => setDashboardRefreshToken((value) => value + 1)}
+              onAnalyticsCleared={() => setIsAnalyticsCleared(true)}
             />
           )}
         </main>

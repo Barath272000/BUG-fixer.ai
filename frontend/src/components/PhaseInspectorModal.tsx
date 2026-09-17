@@ -252,7 +252,7 @@ export const PhaseInspectorModal: React.FC<PhaseInspectorModalProps> = ({
               </button>
             )}
 
-            {phase.id === 8 && (
+            {phase.id === 10 && (
               <button
                 type="button"
                 onClick={() => handleTriggerValidation(false)}
@@ -291,10 +291,10 @@ export const PhaseInspectorModal: React.FC<PhaseInspectorModalProps> = ({
                 <ShieldCheck className="w-3.5 h-3.5" />
                 <span>Security & Sanitization</span>
               </>
-            ) : phase.id === 8 ? (
+            ) : phase.id === 10 ? (
               <>
                 <Sparkles className="w-3.5 h-3.5" />
-                <span>Patch & Validation Loop</span>
+                <span>Validation & Iteration</span>
               </>
             ) : (
               <>
@@ -330,7 +330,7 @@ export const PhaseInspectorModal: React.FC<PhaseInspectorModalProps> = ({
             <span>Terminal / Raw Logs</span>
           </button>
 
-          {phase.id === 8 && (
+          {phase.id === 10 && (
             <button
               type="button"
               onClick={() => setActiveTab('validation-report')}
@@ -424,8 +424,8 @@ export const PhaseInspectorModal: React.FC<PhaseInspectorModalProps> = ({
                 </>
               )}
 
-              {/* PHASE 8: AI Patch & Validation Loop Specialized View */}
-              {phase.id === 8 && (
+              {/* PHASE 10: Validation & Iteration — patch loop, re-run, cycle count */}
+              {phase.id === 10 && (
                 <div className="space-y-4">
                   {/* Validation Loop Header / Interactive Control Box */}
                   <div className="p-4 rounded-lg bg-[#161B22] border border-[#30363D] space-y-3">
@@ -512,8 +512,8 @@ export const PhaseInspectorModal: React.FC<PhaseInspectorModalProps> = ({
                 </div>
               )}
 
-              {/* PHASE 5: Run & Test — Live Application Preview */}
-              {phase.id === 5 && (
+              {/* PHASE 8: Install → Build → Run & Test — Live Application Preview */}
+              {phase.id === 8 && (
                 <div className="p-3.5 rounded-lg bg-[#161B22] border border-[#30363D] space-y-3">
                   <div className="flex items-center gap-2">
                     <Globe className="w-4 h-4 text-indigo-400" />
@@ -705,8 +705,8 @@ export const PhaseInspectorModal: React.FC<PhaseInspectorModalProps> = ({
             </div>
           )}
 
-          {/* TAB 4: FINAL AUDIT REPORT (FOR PHASE 8) */}
-          {activeTab === 'validation-report' && phase.id === 8 && (
+          {/* TAB 4: FINAL AUDIT REPORT (FOR PHASE 10: Validation & Iteration) */}
+          {activeTab === 'validation-report' && phase.id === 10 && (
             <div className="space-y-4">
               <div className="p-4 rounded-lg bg-emerald-950/20 border border-emerald-500/30 space-y-3">
                 <div className="flex items-center justify-between">

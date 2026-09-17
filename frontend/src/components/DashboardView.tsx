@@ -14,12 +14,15 @@ import React, { useEffect, useRef, useState } from 'react';
 import { ApiError, apiRequest, getRealtimeSocketUrl, uploadProjectArchive } from '../api/client';
 import { fetchAnalysisLogs } from '../api/analysis';
 import { connectGithubRepo, getGithubTokenStatus, parseGithubUrl } from '../api/github';
-import { pipelinePhases as initialPipelinePhases } from '../data/mockData';
-import { ContextDoc, PipelinePhase } from '../types';
+import { pipelinePhases as initialPipelinePhases, initialFixAttempts, initialPreviewCheckpoint } from '../data/mockData';
+import { ContextDoc, FixAttempt, PipelinePhase, PreviewCheckpoint, PreviewCheckpointFileEdit } from '../types';
+import { AttemptDiffViewer } from './AttemptDiffViewer';
+import { AttemptTimeline } from './AttemptTimeline';
 import { ContextDocsUploader } from './ContextDocsUploader';
 import { EmbeddedBrowserPreview } from './EmbeddedBrowserPreview';
 import { ExtendedLogLine, LiveLogTable } from './LiveLogTable';
 import { PhaseInspectorModal } from './PhaseInspectorModal';
+import { PreviewCheckpointModal } from './PreviewCheck';
 
 const pendingPipelinePhases: PipelinePhase[] = initialPipelinePhases.map((p) => ({
   ...p,
@@ -102,6 +105,21 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ refreshToken, onAn
   const [progress, setProgress] = useState(0);
   const [phases, setPhases] = useState<PipelinePhase[]>(pendingPipelinePhases);
   const [logs, setLogs] = useState<ExtendedLogLine[]>([]);
+
+  // --- Pipeline v2 UI scaffold (see PIPELINE_V2_ARCHITECTURE.md) ---
+  // Local-state only for now: no backend loop controller / FixAttempt /
+  // PreviewCheckpoint tables exist yet, so these are demo-interactive
+  // (typing a prompt, saving a file edit, or "starting a manual loop"
+  // genuinely updates this component's state) but don't yet re-queue a
+  // real Celery task or persist anything server-side.
+  const [fixAttempts, setFixAttempts] = useState<FixAttempt[]>(initialFixAttempts);
+  const [currentAttemptIndex, setCurrentAttemptIndex] = useState(initialFixAttempts.length - 1);
+  const [showAttemptDiff, setShowAttemptDiff] = useState(false);
+  const [checkpoint, setCheckpoint] = useState<PreviewCheckpoint>(initialPreviewCheckpoint);
+  const [showCheckpointModal, setShowCheckpointModal] = useState(false);
+  const hadHumanInputInRound = checkpoint.promptMessages.some((m) => m.role === 'user') || checkpoint.fileEditsDetected.length > 0;
+  const autoAttemptCount = fixAttempts.filter((a) => a.mode === 'automatic').length;
+
   const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [currentExecutingPhase, setCurrentExecutingPhase] = useState<string>('');
@@ -143,6 +161,61 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ refreshToken, onAn
   const handleOpenPreview = () => {
     if (!projectId || !previewCommand) return;
     setShowEmbeddedPreview(true);
+  };
+
+  // --- Pipeline v2 checkpoint handlers (local-state demo, see note above) ---
+  const handleCheckpointDecision = (openPreview: boolean) => {
+    setCheckpoint((prev) => ({ ...prev, status: openPreview ? 'previewing' : 'resumed' }));
+    if (openPreview) {
+      handleOpenPreview();
+    } else {
+      setShowCheckpointModal(false);
+    }
+  };
+
+  const handleCheckpointSubmitPrompt = (text: string) => {
+    setCheckpoint((prev) => ({
+      ...prev,
+      promptMessages: [
+        ...prev.promptMessages,
+        { id: `msg-${Date.now()}`, role: 'user', text, createdAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) },
+      ],
+    }));
+  };
+
+  const handleCheckpointSaveFileEdit = (edit: PreviewCheckpointFileEdit) => {
+    setCheckpoint((prev) => ({ ...prev, fileEditsDetected: [...prev.fileEditsDetected, edit] }));
+  };
+
+  const handleCheckpointTriggerManualLoop = () => {
+    const previous = fixAttempts[fixAttempts.length - 1];
+    const newAttempt: FixAttempt = {
+      id: `att-${Date.now()}`,
+      bugId: previous?.bugId ?? 'BUG-001',
+      analysisRunId: previous?.analysisRunId ?? checkpoint.analysisRunId,
+      attemptNumber: fixAttempts.length + 1,
+      mode: 'manual',
+      triggerNote: checkpoint.promptMessages.filter((m) => m.role === 'user').slice(-1)[0]?.text ?? null,
+      triggerFileEdit: checkpoint.fileEditsDetected.length > 0,
+      diffSnippet: checkpoint.fileEditsDetected.slice(-1)[0]?.diffSnippet ?? previous?.diffSnippet ?? '',
+      previousAttemptId: previous?.id ?? null,
+      resultStatus: 'pending',
+      errorFingerprint: null,
+      rawErrorOutput: null,
+      createdAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+    };
+    setFixAttempts((prev) => [...prev, newAttempt]);
+    setCurrentAttemptIndex(fixAttempts.length);
+    setShowCheckpointModal(false);
+    // NOTE: once the backend loop controller exists (architecture doc §4/§7),
+    // this is where we'd POST /analysis/{runId}/checkpoint/prompt or
+    // /checkpoint/file-edit, which re-queues the Celery task at Phase 4.
+  };
+
+  const handleCheckpointGoNext = () => {
+    setShowCheckpointModal(false);
+    // NOTE: once the backend exists, this calls POST /analysis/{runId}/checkpoint/go-next
+    // to resume the paused Celery task into Phase 9 (Regression Check).
   };
 
   const refreshRecentRuns = React.useCallback(() => {
@@ -837,7 +910,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ refreshToken, onAn
                   <div className="flex items-center gap-3">
                     <div className="text-right text-xs">
                       <span className="font-semibold text-gray-300">
-                        {phases.filter(p => p.status === 'completed').length}/8 phases
+                        {phases.filter(p => p.status === 'completed').length}/{phases.length} phases
                       </span>
                       <span className="text-gray-500 ml-2">{progress}% complete</span>
                     </div>
@@ -861,6 +934,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ refreshToken, onAn
                         <span>▶ Preview App</span>
                       </button>
                     )}
+                    <button
+                      type="button"
+                      onClick={() => setShowCheckpointModal(true)}
+                      className="px-2.5 py-1 rounded bg-indigo-950/40 hover:bg-indigo-950/60 border border-indigo-500/30 text-[11px] font-mono text-indigo-300 flex items-center gap-1.5 cursor-pointer transition-colors"
+                      title="Opens the Phase 8 Preview Checkpoint UI on demand — the real trigger (automatic, right after Phase 8 finishes) needs the backend loop controller from PIPELINE_V2_ARCHITECTURE.md §4"
+                    >
+                      <span>⏸ Preview Checkpoint (Demo)</span>
+                    </button>
                   </div>
                 </div>
 
@@ -874,7 +955,26 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ refreshToken, onAn
                   />
                 </div>
 
-                {/* 8 Phase Stepper List */}
+                {/* Attempt Timeline — Attempt 1 ● Attempt 2 ● ... */}
+                <AttemptTimeline
+                  attempts={fixAttempts}
+                  currentAttemptIndex={currentAttemptIndex}
+                  onSelectAttempt={(index) => { setCurrentAttemptIndex(index); setShowAttemptDiff(true); }}
+                  runStatus={progress === 100 ? 'COMPLETED' : isAnalyzing ? 'RUNNING' : 'PENDING'}
+                  autoAttemptCount={autoAttemptCount}
+                  maxAutoAttempts={3}
+                  hadHumanInputInRound={hadHumanInputInRound}
+                  onOpenPromptPad={() => setShowCheckpointModal(true)}
+                />
+
+                {showAttemptDiff && fixAttempts[currentAttemptIndex] && (
+                  <AttemptDiffViewer
+                    currentAttempt={fixAttempts[currentAttemptIndex]}
+                    previousAttempt={fixAttempts.find((a) => a.id === fixAttempts[currentAttemptIndex].previousAttemptId) ?? null}
+                  />
+                )}
+
+                {/* 10 Phase Stepper List */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-2 pt-1">
                   {phases.map((phase) => {
                     const isCompleted = phase.status === 'completed';
@@ -1047,6 +1147,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ refreshToken, onAn
           onClose={() => setShowEmbeddedPreview(false)}
         />
       )}
+
+      <PreviewCheckpointModal
+        isOpen={showCheckpointModal}
+        onClose={() => setShowCheckpointModal(false)}
+        checkpoint={checkpoint}
+        onDecision={handleCheckpointDecision}
+        onSubmitPrompt={handleCheckpointSubmitPrompt}
+        onSaveFileEdit={handleCheckpointSaveFileEdit}
+        onTriggerManualLoop={handleCheckpointTriggerManualLoop}
+        onGoNext={handleCheckpointGoNext}
+        hadHumanInput={hadHumanInputInRound}
+      />
     </div>
   );
 };

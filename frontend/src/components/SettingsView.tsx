@@ -47,6 +47,9 @@ function modelIdFor(provider: string, model: string): string {
 interface SettingsViewProps {
   projectId: string | null;
   onHistoryChanged?: () => void;
+  /** Fired after the analytics/test-run data is purged, so the Analytics
+   * view can switch to its cleared-telemetry state. */
+  onAnalyticsCleared?: () => void;
 }
 
 type ClearActionType = 'recent' | 'bugs' | 'fixes' | 'tests' | 'all';
@@ -58,7 +61,7 @@ interface ConfirmModalState {
   actionLabel: string;
 }
 
-export const SettingsView: React.FC<SettingsViewProps> = ({ projectId, onHistoryChanged }) => {
+export const SettingsView: React.FC<SettingsViewProps> = ({ projectId, onHistoryChanged, onAnalyticsCleared }) => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -151,6 +154,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ projectId, onHistory
         showToast(`Cleared ${deleted} AI fix record${deleted === 1 ? '' : 's'}`);
       } else if (actionType === 'tests') {
         const deleted = await clearAnalyticsTestRuns(projectId);
+        onAnalyticsCleared?.();
         showToast(`Cleared ${deleted} test run record${deleted === 1 ? '' : 's'}`);
       } else if (actionType === 'all') {
         const clearedRecent = clearRecentFiles(projectId);
@@ -164,6 +168,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ projectId, onHistory
         setBugCount(0);
         setTestRunCount(0);
         onHistoryChanged?.();
+        onAnalyticsCleared?.();
         showToast(`Purged ${deletedBugs} bug${deletedBugs === 1 ? '' : 's'}, ${deletedTests} test run record${deletedTests === 1 ? '' : 's'}, ${deletedRuns} analysis run${deletedRuns === 1 ? '' : 's'}, and ${clearedRecent} recent file${clearedRecent === 1 ? '' : 's'}`);
       }
       await loadDataCounts();

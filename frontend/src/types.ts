@@ -97,6 +97,63 @@ export interface PipelinePhase {
   };
 }
 
+// --- Pipeline v2 (10-phase architecture, see PIPELINE_V2_ARCHITECTURE.md) ---
+// These types are UI-scaffold-only for now: the components that use them
+// (PreviewCheckpointModal, PromptPad, AttemptDiffViewer, AttemptTimeline)
+// run on local/sample state until the backend loop controller, FixAttempt
+// table, and PreviewCheckpoint table (architecture doc \u00a73) are built.
+
+export type AnalysisRunStatus =
+  | 'PENDING'
+  | 'RUNNING'
+  | 'AWAITING_REVIEW'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'NEEDS_HUMAN_REVIEW';
+
+export interface FixAttempt {
+  id: string;
+  bugId: string;
+  analysisRunId: string;
+  attemptNumber: number; // 1, 2, 3...
+  mode: 'automatic' | 'manual';
+  triggerNote?: string | null; // the prompt pad text, if manual
+  triggerFileEdit?: boolean; // true if triggered by a direct file edit
+  diffSnippet: string;
+  previousAttemptId?: string | null; // for old-vs-new diff view
+  resultStatus: 'pending' | 'pass' | 'fail';
+  errorFingerprint?: string | null; // normalized hash, for same-error detection
+  rawErrorOutput?: string | null;
+  createdAt: string;
+  linesAdded?: number;
+  linesRemoved?: number;
+}
+
+export interface PreviewCheckpointPromptMessage {
+  id: string;
+  role: 'user' | 'assistant' | 'system';
+  text: string;
+  createdAt: string;
+}
+
+export interface PreviewCheckpointFileEdit {
+  filePath: string;
+  diffSnippet: string;
+  detectedAt: string;
+  newContent?: string;
+}
+
+export interface PreviewCheckpoint {
+  id: string;
+  analysisRunId: string;
+  previewSessionId?: string;
+  status: 'awaiting_decision' | 'previewing' | 'resumed' | 'rejected' | 'timeout';
+  promptMessages: PreviewCheckpointPromptMessage[];
+  fileEditsDetected: PreviewCheckpointFileEdit[];
+  createdAt: string;
+  resumedAt?: string | null;
+}
+
 export interface LogLine {
   id: string;
   timestamp: string;
