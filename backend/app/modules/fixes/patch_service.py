@@ -16,6 +16,18 @@ def count_changed_lines(diff: str) -> int:
     return count
 
 
+def count_added_removed_lines(diff: str) -> tuple[int, int]:
+    """Same walk as count_changed_lines but split by direction -- feeds
+    FixAttempt.linesAdded/linesRemoved (Job 4)."""
+    added = removed = 0
+    for line in diff.split("\n"):
+        if line.startswith("+") and not line.startswith("+++"):
+            added += 1
+        elif line.startswith("-") and not line.startswith("---"):
+            removed += 1
+    return added, removed
+
+
 async def read_workspace_file(root: str, file: str) -> str:
     target = resolve_safe_path(root, file)
     async with aiofiles.open(target, "r", encoding="utf-8") as f:

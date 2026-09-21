@@ -18,7 +18,12 @@ from app.models.settings import ProviderCredential
 from app.modules.ai.confidence import clamp_confidence
 from app.modules.ai.context_builder import build_ai_context
 from app.modules.ai.model_router import resolve_model
-from app.modules.ai.prompt_builder import build_copilot_prompt, build_diagnosis_prompt
+from app.modules.ai.prompt_builder import build_copilot_prompt, build_diagnosis_prompt, build_patch_prompt, build_root_cause_prompt
+from app.modules.ai.providers.anthropic_provider import AnthropicProvider
+from app.modules.ai.confidence import clamp_confidence
+from app.modules.ai.context_builder import build_ai_context
+from app.modules.ai.model_router import resolve_model
+from app.modules.ai.prompt_builder import build_copilot_prompt, build_diagnosis_prompt, build_patch_prompt, build_root_cause_prompt
 from app.modules.ai.providers.anthropic_provider import AnthropicProvider
 from app.modules.ai.providers.base import AIProvider, ChatRequest, ProviderChatError
 from app.modules.ai.providers.google_provider import GoogleProvider
@@ -107,7 +112,7 @@ def _parse_json(text: str) -> dict:
         )
 
 
-async def diagnose_bug(
+async def diagnose_root_cause(
     db: AsyncSession,
     user_id: str,
     project_id: str,
@@ -115,6 +120,8 @@ async def diagnose_bug(
     provider: str | None = None,
     model: str | None = None,
 ) -> dict:
+    """Phase 5: AI Root Cause Analysis. First of two real, separate AI
+    calls (Job 4) -- diagnosis only, no patch. See build_root_cause_prompt."""
     resolved = await resolve_model(db, provider, model, user_id)
     creds = await _credentials(db, user_id, resolved.provider)
     context = await build_ai_context(db, project_id, bug_id=bug_id)
@@ -122,15 +129,13 @@ async def diagnose_bug(
     chat_request = ChatRequest(
         model=resolved.model,
         system="You are a senior debugging engineer.",
-        user=build_diagnosis_prompt(context),
+        user=build_root_cause_prompt(context),
         api_key=creds["key"],
         base_url=creds["base_url"],
     )
     try:
         chat_result = await _provider_for(resolved.provider).chat(chat_request)
     except ProviderChatError as exc:
-        # A 429 reports remaining=0 in its headers - record that real usage
-        # data even though the call itself failed, then let it propagate.
         if exc.rate_limit:
             await record_rate_limit(user_id, resolved.provider, resolved.model, exc.rate_limit)
         raise
@@ -143,14 +148,93 @@ async def diagnose_bug(
     return {
         "provider": resolved.provider,
         "model": resolved.model,
-        "confidence": clamp_confidence(float(result.get("confidence", 0) or 0)),
+        "rootCause": str(result.get("rootCause", "")),
         "explanation": str(result.get("explanation", "")),
-        "patchSummary": str(result.get("patchSummary", "")),
+        "confidence": clamp_confidence(float(result.get("confidence", 0) or 0)),
         "affectedFiles": [str(f) for f in (result.get("affectedFiles") or [])],
+        "blastRadius": str(result.get("blastRadius", "")),
+    }
+
+
+async def generate_patch(
+    db: AsyncSession,
+    user_id: str,
+    project_id: str,
+    bug_id: str,
+    diagnosis: dict,
+    provider: str | None = None,
+    model: str | None = None,
+) -> dict:
+    """Phase 6: AI Patch Generation. Second of two real, separate AI calls
+    (Job 4) -- takes Phase 5's settled diagnosis as a hard input rather than
+    re-deriving root cause, so the patch can't silently diverge from it.
+    Reuses the *same* provider/model resolved for diagnosis unless the
+    caller explicitly overrides -- keeps one bug's attempt on one model
+    instead of mixing providers mid-diagnosis."""
+    resolved = await resolve_model(db, provider or diagnosis.get("provider"), model or diagnosis.get("model"), user_id)
+    creds = await _credentials(db, user_id, resolved.provider)
+    context = await build_ai_context(db, project_id, bug_id=bug_id)
+
+    chat_request = ChatRequest(
+        model=resolved.model,
+        system="You are a senior debugging engineer.",
+        user=build_patch_prompt(context, diagnosis),
+        api_key=creds["key"],
+        base_url=creds["base_url"],
+    )
+    try:
+        chat_result = await _provider_for(resolved.provider).chat(chat_request)
+    except ProviderChatError as exc:
+        if exc.rate_limit:
+            await record_rate_limit(user_id, resolved.provider, resolved.model, exc.rate_limit)
+        raise
+
+    if chat_result.rate_limit:
+        await record_rate_limit(user_id, resolved.provider, resolved.model, chat_result.rate_limit)
+
+    result = _parse_json(chat_result.text)
+
+    return {
+        "provider": resolved.provider,
+        "model": resolved.model,
+        "patchSummary": str(result.get("patchSummary", "")),
         "estimatedMinutes": max(1, int(result.get("estimatedMinutes", 15) or 15)),
         "originalCode": str(result.get("originalCode", "")),
         "proposedCode": str(result.get("proposedCode", "")),
         "unifiedDiff": str(result.get("unifiedDiff", "")),
+    }
+
+
+async def diagnose_bug(
+    db: AsyncSession,
+    user_id: str,
+    project_id: str,
+    bug_id: str,
+    provider: str | None = None,
+    model: str | None = None,
+) -> dict:
+    """LEGACY combined entry point -- now implemented as the same two real,
+    separate calls Phase 5/6 use (diagnose_root_cause then generate_patch)
+    rather than one merged prompt, so any caller still using this single
+    function gets identical fields back with no behavior change."""
+    diagnosis = await diagnose_root_cause(db, user_id, project_id, bug_id, provider, model)
+    patch = await generate_patch(db, user_id, project_id, bug_id, diagnosis, diagnosis["provider"], diagnosis["model"])
+
+    root_cause = diagnosis.get("rootCause", "")
+    explanation = diagnosis.get("explanation", "")
+    combined_explanation = f"Root cause: {root_cause}\n\n{explanation}" if root_cause else explanation
+
+    return {
+        "provider": patch["provider"],
+        "model": patch["model"],
+        "confidence": diagnosis["confidence"],
+        "explanation": combined_explanation,
+        "patchSummary": patch["patchSummary"],
+        "affectedFiles": diagnosis["affectedFiles"],
+        "estimatedMinutes": patch["estimatedMinutes"],
+        "originalCode": patch["originalCode"],
+        "proposedCode": patch["proposedCode"],
+        "unifiedDiff": patch["unifiedDiff"],
     }
 
 

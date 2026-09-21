@@ -31,7 +31,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.websocket.realtime_gateway import REALTIME_EVENTS, RealtimeGateway
@@ -39,10 +39,15 @@ from app.models.analysis import AnalysisRun, PipelinePhase
 from app.models.bug import Bug, ErrorRecord
 from app.models.enums import AIStatus, BugStatus
 from app.models.fix import FixProposal, TestRun
+from app.models.loop import FixAttempt, PreviewCheckpoint
 from app.models.context import Workspace
 from app.models.enums import AnalysisStatus, PhaseStatus, ProjectStatus, SourceType
+from app.models.enums import FixAttemptMode, FixAttemptResult, Provider
+from app.models.enums import CheckpointStatus
+from app.models.enums import ValidationStatus
 from app.modules.fixes.service import generate_fix
-from app.modules.fixes.patch_service import apply_simple_replacement, read_workspace_file, write_workspace_file
+from app.modules.ai.service import diagnose_root_cause, generate_patch
+from app.modules.fixes.patch_service import apply_simple_replacement, count_added_removed_lines, count_changed_lines, read_workspace_file, write_workspace_file
 from app.modules.fixes.validation_service import validate_workspace
 from app.models.project import Project
 from app.modules.analysis.detectors import detect_build_command, detect_preview, detect_test_command
@@ -51,7 +56,7 @@ from app.modules.analysis.pipeline_service import add_log, set_security_report, 
 from app.modules.code_analysis.project_inspector import inspect_project
 from app.modules.static_analysis.service import run_static_analysis
 from app.modules.bugs.service import create_bug_from_error
-from app.modules.errors.error_collector import record_error
+from app.modules.errors.error_collector import fingerprint, record_error
 from app.modules.errors.test_result_parser import parse_generic_test_output
 from app.modules.sandbox.sandbox_service import run_sandbox
 from app.modules.uploads.security_scanner import run_security_scan
@@ -186,56 +191,144 @@ async def _collect_run_errors(
     db: AsyncSession,
     analysis_id: str,
     project_id: str,
-) -> list[ErrorRecord]:
-    """Load the errors emitted by build/test/sandbox and ensure each has a bug."""
-    stmt = select(ErrorRecord).where(
+) -> tuple[list[ErrorRecord], list[Bug]]:
+    """Phase 4 evidence set -- STATIC-ONLY DESIGN (confirmed, Job 3): this
+    run has no build/test output yet (that happens later, at Phase 8), so
+    evidence is exactly two things:
+      1. This run's own ErrorRecord rows -- right now exclusively Phase 3
+         static-analysis findings. create_bug_from_error() already turned
+         each one into a Bug (or a BugOccurrence on an existing one) when
+         Phase 3 recorded it, so nothing here creates anything new.
+      2. Any bug the user already logged by hand via "Log Bug" (Bug rows
+         with analysisRunId IS NULL, i.e. not tied to any prior run) that's
+         still open -- these get diagnosed alongside this run's own
+         findings without being reassigned to this run, so a bug's
+         analysisRunId still honestly reflects where it was first found.
+    """
+    errors_stmt = select(ErrorRecord).where(
         ErrorRecord.analysisRunId == analysis_id,
         ErrorRecord.projectId == project_id,
     )
-    errors = list((await db.execute(stmt)).scalars().all())
-    project = await db.get(Project, project_id)
-    for error in errors:
-        await create_bug_from_error(db, project, error)
-    return errors
+    errors = list((await db.execute(errors_stmt)).scalars().all())
+
+    logged_bugs_stmt = select(Bug).where(
+        Bug.projectId == project_id,
+        Bug.analysisRunId.is_(None),
+        Bug.status.in_((BugStatus.Open, BugStatus.InReview, BugStatus.AISuggested)),
+    )
+    logged_bugs = list((await db.execute(logged_bugs_stmt)).scalars().all())
+
+    return errors, logged_bugs
 
 
-async def _generate_run_fixes(
+async def _bugs_in_scope_for_run(db: AsyncSession, project_id: str, analysis_id: str) -> list[Bug]:
+    """Shared bug-selection query for Phase 5/6: bugs this run's Phase 3
+    static analysis found (analysisRunId == this run) plus any still-open
+    bug the user logged by hand and that hasn't been claimed by a prior run
+    (analysisRunId IS NULL) -- matches the Phase 4 static-only evidence set."""
+    stmt = select(Bug).where(
+        Bug.projectId == project_id,
+        Bug.status.in_((BugStatus.Open, BugStatus.InReview, BugStatus.AISuggested)),
+        or_(Bug.analysisRunId == analysis_id, Bug.analysisRunId.is_(None)),
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
+async def _diagnose_run_bugs(
     db: AsyncSession,
     project: Project,
     analysis_id: str,
-) -> list[FixProposal]:
-    """Generate one AI proposal per open bug found during this run."""
-    stmt = select(Bug).where(
-        Bug.projectId == project.id,
-        Bug.analysisRunId == analysis_id,
-        Bug.status.in_((BugStatus.Open, BugStatus.InReview, BugStatus.AISuggested)),
-    )
-    bugs = (await db.execute(stmt)).scalars().all()
-    fixes: list[FixProposal] = []
+) -> dict[str, dict]:
+    """Phase 5: AI Root Cause Analysis. Job 4's first of two real, separate
+    AI calls -- diagnosis only, no patch yet. Returns {bug_id: diagnosis}
+    so Phase 6 can read each bug's settled diagnosis back out of the same
+    run_analysis_pipeline() call (both phases execute in one function, one
+    loop, so this dict just lives as a local variable between them)."""
+    bugs = await _bugs_in_scope_for_run(db, project.id, analysis_id)
+    diagnoses: dict[str, dict] = {}
     for bug in bugs:
-        fix = await generate_fix(db, project.ownerId, bug.id, None, None)
-        fix.analysisRunId = analysis_id
+        diagnoses[bug.id] = await diagnose_root_cause(db, project.ownerId, project.id, bug.id, None, None)
+    return diagnoses
+
+
+async def _generate_run_patches(
+    db: AsyncSession,
+    project: Project,
+    analysis_id: str,
+    diagnoses: dict[str, dict],
+) -> list[FixProposal]:
+    """Phase 6: AI Patch Generation. Job 4's second real AI call -- patch
+    synthesis grounded in Phase 5's settled diagnosis. Also creates the
+    first FixAttempt row per bug (attemptNumber=1, previousAttemptId=None):
+    the loop controller that creates attempt 2+ on a failed validation is
+    Job 6's job, not this one -- this just makes sure attempt 1 always
+    exists so the frontend's FixAttempt history isn't empty from run one."""
+    fixes: list[FixProposal] = []
+    for bug_id, diagnosis in diagnoses.items():
+        bug = await db.get(Bug, bug_id)
+        patch = await generate_patch(db, project.ownerId, project.id, bug_id, diagnosis, diagnosis["provider"], diagnosis["model"])
+
+        root_cause = diagnosis.get("rootCause", "")
+        explanation = f"Root cause: {root_cause}\n\n{diagnosis['explanation']}" if root_cause else diagnosis["explanation"]
+
+        fix = FixProposal(
+            bugId=bug.id,
+            projectId=project.id,
+            analysisRunId=analysis_id,
+            provider=Provider(patch["provider"]),
+            model=patch["model"],
+            confidence=diagnosis["confidence"],
+            explanation=explanation,
+            patchSummary=patch["patchSummary"],
+            unifiedDiff=patch["unifiedDiff"],
+            originalCode=patch.get("originalCode"),
+            proposedCode=patch.get("proposedCode"),
+            affectedFiles=diagnosis["affectedFiles"],
+            linesChanged=count_changed_lines(patch["unifiedDiff"]),
+            estimatedMinutes=patch["estimatedMinutes"],
+        )
+        db.add(fix)
         bug.aiStatus = AIStatus.Ready
         bug.status = BugStatus.AISuggested
         await db.commit()
         await db.refresh(fix)
+
+        added, removed = count_added_removed_lines(patch["unifiedDiff"])
+        db.add(FixAttempt(
+            bugId=bug.id,
+            analysisRunId=analysis_id,
+            attemptNumber=1,
+            mode=FixAttemptMode.automatic,
+            fixProposalId=fix.id,
+            diffSnippet=patch["unifiedDiff"][:8000],
+            resultStatus=FixAttemptResult.pending,
+            linesAdded=added,
+            linesRemoved=removed,
+        ))
+        await db.commit()
+
         fixes.append(fix)
     return fixes
 
 
-async def _validate_run_fixes(
+async def _run_regression_validation(
     db: AsyncSession,
     project: Project,
     fixes: list[FixProposal],
-) -> int:
-    """Validate generated replacements in disposable copies, never live source."""
+) -> dict[str, dict]:
+    """Phase 9: validates each fix in a disposable workspace copy (never
+    live source). Returns {bug_id: {"passed": bool, "stdout": str, "stderr": str}}
+    -- Phase 10's loop controller reads this to know which bugs need a retry."""
     if not project.workspacePath:
         raise PipelineError("Workspace is not initialized for patch validation")
 
     command = await detect_test_command(project.workspacePath, project.language or "Unknown")
-    validated = 0
+    results: dict[str, dict] = {}
     for fix in fixes:
         if not fix.originalCode or not fix.proposedCode or len(fix.affectedFiles) != 1:
+            results[fix.bugId] = {
+                "passed": False, "stdout": "", "stderr": "Patch has no single-file safe replacement context to validate",
+            }
             continue
         temporary_root = tempfile.mkdtemp(prefix="bugfix-validation-")
         try:
@@ -244,14 +337,105 @@ async def _validate_run_fixes(
             current = await read_workspace_file(temporary_root, file_path)
             updated = apply_simple_replacement(current, fix.originalCode, fix.proposedCode)
             await write_workspace_file(temporary_root, file_path, updated)
-            await validate_workspace(db, project.id, fix.id, temporary_root, command)
-            validated += 1
+            outcome = await validate_workspace(db, project.id, fix.id, temporary_root, command)
+            passed = outcome["validation"].status == ValidationStatus.PASSED
+            results[fix.bugId] = {"passed": passed, "stdout": outcome["stdout"], "stderr": outcome["stderr"]}
         finally:
             shutil.rmtree(temporary_root, ignore_errors=True)
-    return validated
+    return results
 
 
-async def run_analysis_pipeline(db: AsyncSession, gateway: RealtimeGateway, analysis_id: str, project_id: str) -> None:
+async def _retry_bug_until_pass_or_exhausted(
+    db: AsyncSession,
+    gateway: RealtimeGateway,
+    analysis_id: str,
+    project_id: str,
+    project: Project,
+    bug: Bug,
+    latest_attempt: FixAttempt,
+    max_attempts: int,
+) -> str:
+    """Phase 10's actual loop (Job 6): re-diagnoses, re-patches, and
+    re-validates one failing bug, up to max_attempts total attempts.
+    Stops early if two consecutive attempts fail with the identical error
+    fingerprint -- the same-error guard from the frontend design, since
+    regenerating a patch that keeps failing the exact same way burns
+    attempts without making progress. Returns "passed", "same_error", or
+    "exhausted"."""
+    current_attempt = latest_attempt
+    while current_attempt.attemptNumber < max_attempts:
+        next_attempt_number = current_attempt.attemptNumber + 1
+
+        # Fresh diagnosis, not the stale one from earlier this run -- the
+        # bug just failed validation, which is new evidence the first
+        # diagnosis didn't have.
+        diagnosis = await diagnose_root_cause(db, project.ownerId, project.id, bug.id, None, None)
+        patch = await generate_patch(db, project.ownerId, project.id, bug.id, diagnosis, diagnosis["provider"], diagnosis["model"])
+
+        root_cause = diagnosis.get("rootCause", "")
+        explanation = f"Root cause: {root_cause}\n\n{diagnosis['explanation']}" if root_cause else diagnosis["explanation"]
+        new_fix = FixProposal(
+            bugId=bug.id, projectId=project.id, analysisRunId=analysis_id,
+            provider=Provider(patch["provider"]), model=patch["model"],
+            confidence=diagnosis["confidence"], explanation=explanation,
+            patchSummary=patch["patchSummary"], unifiedDiff=patch["unifiedDiff"],
+            originalCode=patch.get("originalCode"), proposedCode=patch.get("proposedCode"),
+            affectedFiles=diagnosis["affectedFiles"], linesChanged=count_changed_lines(patch["unifiedDiff"]),
+            estimatedMinutes=patch["estimatedMinutes"],
+        )
+        db.add(new_fix)
+        await db.commit()
+        await db.refresh(new_fix)
+
+        added, removed = count_added_removed_lines(patch["unifiedDiff"])
+        new_attempt = FixAttempt(
+            bugId=bug.id, analysisRunId=analysis_id, attemptNumber=next_attempt_number,
+            mode=FixAttemptMode.automatic, previousAttemptId=current_attempt.id,
+            fixProposalId=new_fix.id, diffSnippet=patch["unifiedDiff"][:8000],
+            resultStatus=FixAttemptResult.pending, linesAdded=added, linesRemoved=removed,
+        )
+        db.add(new_attempt)
+        await db.commit()
+
+        result = (await _run_regression_validation(db, project, [new_fix])).get(bug.id)
+        if result is None:
+            return "exhausted"
+
+        if result["passed"]:
+            new_attempt.resultStatus = FixAttemptResult.pass_
+            await db.commit()
+            await add_log(db, gateway, analysis_id, project_id, "PASS", "Validation & Iteration",
+                          f"Bug fixed on retry attempt #{next_attempt_number} ({bug.id})")
+            return "passed"
+
+        new_fingerprint = fingerprint(result["stderr"] or result["stdout"] or "validation failed")
+        new_attempt.resultStatus = FixAttemptResult.fail
+        new_attempt.errorFingerprint = new_fingerprint
+        new_attempt.rawErrorOutput = (result["stderr"] or result["stdout"])[:8000]
+        await db.commit()
+
+        if current_attempt.errorFingerprint and current_attempt.errorFingerprint == new_fingerprint:
+            await add_log(db, gateway, analysis_id, project_id, "WARN", "Validation & Iteration",
+                          f"Attempt #{next_attempt_number} failed with the same error as the previous "
+                          f"attempt — stopping retries for this bug ({bug.id})")
+            return "same_error"
+
+        current_attempt = new_attempt
+
+    return "exhausted"
+
+
+async def run_analysis_pipeline(
+    db: AsyncSession,
+    gateway: RealtimeGateway,
+    analysis_id: str,
+    project_id: str,
+    start_from_phase: int = 1,
+) -> None:
+    """start_from_phase (Job 5): 1 for a fresh run. When resuming from the
+    Phase 8 Preview Checkpoint, resume_analysis_pipeline() calls this with
+    start_from_phase=9 so phases 1-8 (already COMPLETED in the DB from the
+    first pass) are skipped rather than re-executed."""
     run_stmt = (
         select(AnalysisRun)
         .where(AnalysisRun.id == analysis_id)
@@ -268,21 +452,39 @@ async def run_analysis_pipeline(db: AsyncSession, gateway: RealtimeGateway, anal
     phases = {p.number: p for p in (await db.execute(phases_stmt)).scalars().all()}
 
     run.status = AnalysisStatus.RUNNING
-    run.startedAt = datetime.now(timezone.utc)
+    if start_from_phase == 1:
+        run.startedAt = datetime.now(timezone.utc)
     await db.commit()
 
-    await gateway.publish(
-        project_id,
-        {"type": "analysis.started", "projectId": project_id, "analysisId": analysis_id, "payload": {"analysisId": analysis_id}},
-    )
+    if start_from_phase == 1:
+        await gateway.publish(
+            project_id,
+            {"type": "analysis.started", "projectId": project_id, "analysisId": analysis_id, "payload": {"analysisId": analysis_id}},
+        )
+    else:
+        await gateway.publish(
+            project_id,
+            {"type": "analysis.resumed", "projectId": project_id, "analysisId": analysis_id, "payload": {"analysisId": analysis_id, "resumedFromPhase": start_from_phase}},
+        )
 
     work_root = os.path.abspath(os.path.join("sandbox-work", project_id, analysis_id))
     current_phase: PipelinePhase | None = None
+    # Phase 5 -> Phase 6 handoff: both blocks run inside this same function
+    # call's loop, so a plain local dict is enough to pass each bug's
+    # settled diagnosis from Phase 5 into Phase 6 without a DB round trip.
+    # NOTE: on a resumed run (start_from_phase=9) this stays empty, since
+    # Phase 5/6 already ran and completed in the first pass -- nothing
+    # currently re-reads it after a resume, so this is safe as-is.
+    run_diagnoses: dict[str, dict] = {}
+    # Phase 9 -> Phase 10 handoff, same pattern as run_diagnoses above.
+    run_regression_results: dict[str, dict] = {}
 
     try:
         os.makedirs(work_root, exist_ok=True)
 
         for definition in PIPELINE_DEFINITIONS:
+            if definition["number"] < start_from_phase:
+                continue
             phase = phases.get(definition["number"])
             if phase is None:
                 raise PipelineError(f"Missing pipeline phase {definition['number']}")
@@ -432,68 +634,63 @@ async def run_analysis_pipeline(db: AsyncSession, gateway: RealtimeGateway, anal
                     await add_log(db, gateway, analysis_id, project_id, "WARN", "Static Analysis",
                                   f"No linters registered for {project.language or 'this language'} yet — skipped", phase.id)
 
-            # Phase 4: Error & Evidence Collection — REUSED from old Phase 6
-            # (_collect_run_errors, unchanged). Moved from #6 -> #4.
-            # SCOPE NOTE (Job 3 will revisit this): at this point in the new
-            # order only Phase 3's static-analysis findings exist for this
-            # run — Phase 8 (build/run/test) hasn't happened yet, so no
-            # runtime/build errors are available here yet. That's expected
-            # under the new "diagnose from static findings first" design;
-            # flagged as an open item rather than silently assumed final.
+            # Phase 4: Error & Evidence Collection — STATIC-ONLY DESIGN
+            # (confirmed, Job 3). Evidence is Phase 3's static-analysis
+            # findings for this run plus any bug the user already logged by
+            # hand that's still open. Reused from old Phase 6
+            # (_collect_run_errors), moved from #6 -> #4.
             if definition["number"] == 4:
                 subprocesses = _phase_steps([
-                    ("load_run_errors", "Load errors from executed phases", "errors"),
+                    ("load_run_errors", "Load static-analysis errors from this run", "errors"),
+                    ("load_logged_bugs", "Load previously logged, still-open bugs", "errors"),
                     ("fingerprint_errors", "Fingerprint and deduplicate errors", "errors"),
-                    ("sync_bugs", "Synchronize errors into bug records", "errors"),
+                    ("sync_bugs", "Confirm full evidence set is bug-tracked", "errors"),
                 ])
                 await set_subprocesses(db, gateway, analysis_id, project_id, phase, subprocesses)
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "load_run_errors", "running")
-                errors = await _collect_run_errors(db, analysis_id, project_id)
+                errors, logged_bugs = await _collect_run_errors(db, analysis_id, project_id)
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "load_run_errors", "completed", {"errors": str(len(errors))})
+                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "load_logged_bugs", "completed", {"loggedBugs": str(len(logged_bugs))})
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "fingerprint_errors", "completed", {"uniqueFingerprints": str(len({error.fingerprint for error in errors}))})
-                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "sync_bugs", "completed", {"bugsSynchronized": str(len(errors))})
+                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "sync_bugs", "completed", {"totalEvidence": str(len(errors) + len(logged_bugs))})
                 await add_log(db, gateway, analysis_id, project_id, "PASS", "Error & Evidence Collection",
-                              f"Collected {len(errors)} error(s) and synchronized bug records", phase.id)
+                              f"Evidence set for this run: {len(errors)} static-analysis finding(s) "
+                              f"+ {len(logged_bugs)} previously logged bug(s)", phase.id)
 
-            # Phase 5: AI Root Cause Analysis — REUSED from old Phase 7
-            # (_generate_run_fixes, unchanged). Moved from #7 -> #5.
+            # Phase 5: AI Root Cause Analysis — REAL (Job 4). First of two
+            # separate AI calls: diagnosis only, no patch (_diagnose_run_bugs
+            # -> diagnose_root_cause). Moved from old #7 -> #5.
             if definition["number"] == 5:
                 subprocesses = _phase_steps([
                     ("build_ai_context", "Build source-aware bug context", "ai"),
-                    ("generate_diagnoses", "Generate AI root-cause proposals", "ai"),
-                    ("persist_proposals", "Persist fix proposals", "ai"),
+                    ("generate_diagnoses", "Generate AI root-cause diagnoses", "ai"),
                 ])
                 await set_subprocesses(db, gateway, analysis_id, project_id, phase, subprocesses)
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "build_ai_context", "running")
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "build_ai_context", "completed")
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "generate_diagnoses", "running")
-                run_fixes = await _generate_run_fixes(db, project, analysis_id)
-                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "generate_diagnoses", "completed", {"fixes": str(len(run_fixes))})
-                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "persist_proposals", "completed", {"proposals": str(len(run_fixes))})
+                run_diagnoses = await _diagnose_run_bugs(db, project, analysis_id)
+                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "generate_diagnoses", "completed", {"diagnoses": str(len(run_diagnoses))})
                 await add_log(db, gateway, analysis_id, project_id, "PASS", "AI Root Cause Analysis",
-                              f"Generated {len(run_fixes)} AI root-cause diagnosis(es)", phase.id)
+                              f"Generated {len(run_diagnoses)} AI root-cause diagnosis(es)", phase.id)
 
-            # Phase 6: AI Patch Generation — STUB (Job 4). generate_fix()
-            # already produces a full unified diff as part of Phase 5's
-            # call, so for now this phase just reports on those same
-            # proposals instead of making a second AI call. Job 4 will
-            # split diagnosis and patch synthesis into two real, separate
-            # steps and add the old-vs-new attempt diff comparison.
+            # Phase 6: AI Patch Generation — REAL (Job 4). Second separate AI
+            # call, grounded in Phase 5's settled diagnosis
+            # (_generate_run_patches -> generate_patch). Also creates each
+            # bug's first FixAttempt row (attemptNumber=1) — the retry loop
+            # that creates attempt 2+ is Job 6, not this phase.
             if definition["number"] == 6:
-                fixes_stmt = select(FixProposal).where(FixProposal.analysisRunId == analysis_id)
-                run_fixes = list((await db.execute(fixes_stmt)).scalars().all())
-                subprocesses = [{
-                    "id": "patch_synthesis_stub",
-                    "name": "Patch synthesis (reusing Phase 5 output — Job 4 pending)",
-                    "completed": True,
-                    "status": "completed",
-                    "category": "ai",
-                    "metrics": {"patches": str(len(run_fixes))},
-                }]
+                subprocesses = _phase_steps([
+                    ("synthesize_patches", "Synthesize patches from settled diagnoses", "ai"),
+                    ("persist_proposals", "Persist fix proposals & attempt 1", "ai"),
+                ])
                 await set_subprocesses(db, gateway, analysis_id, project_id, phase, subprocesses)
-                await add_log(db, gateway, analysis_id, project_id, "WARN", "AI Patch Generation",
-                              f"Stub phase: reporting {len(run_fixes)} patch(es) already produced in Phase 5. "
-                              f"Old-vs-new attempt diffing not implemented yet.", phase.id)
+                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "synthesize_patches", "running")
+                run_fixes = await _generate_run_patches(db, project, analysis_id, run_diagnoses)
+                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "synthesize_patches", "completed", {"patches": str(len(run_fixes))})
+                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "persist_proposals", "completed", {"proposals": str(len(run_fixes))})
+                await add_log(db, gateway, analysis_id, project_id, "PASS", "AI Patch Generation",
+                              f"Synthesized {len(run_fixes)} patch(es), attempt #1 recorded for each", phase.id)
 
             # Phase 7: Isolated Environment — REUSED from old Phase 3
             # (_run_isolated_environment, unchanged body). Moved from #3 -> #7.
@@ -574,13 +771,14 @@ async def run_analysis_pipeline(db: AsyncSession, gateway: RealtimeGateway, anal
                                   f"Tests failed: {detail[:4000]}", phase.id)
                     raise PipelineError(f"Tests failed: {detail[:2000]}")
 
-                # TODO (Job 5): pause here — set run.status = AWAITING_REVIEW,
-                # create a PreviewCheckpoint row, and stop the task instead
-                # of falling through to Phase 9.
+                # Phase 8's TODO is resolved below, right after the shared
+                # phase-completed tail block -- the checkpoint needs
+                # phase.status == COMPLETED / durationMs set first, which
+                # the shared tail computes, so the pause check runs after it.
 
-            # Phase 9: Regression Check — STUB (Job 5). Reuses the old
-            # disposable-workspace validation (_validate_run_fixes) as a
-            # placeholder for a dedicated full regression suite.
+            # Phase 9: Regression Check — REAL (Job 6). Full validation of
+            # every Phase 6 patch, per bug, updating that bug's attempt #1
+            # FixAttempt with the real pass/fail result and fingerprint.
             if definition["number"] == 9:
                 fixes_stmt = select(FixProposal).where(FixProposal.analysisRunId == analysis_id)
                 run_fixes = list((await db.execute(fixes_stmt)).scalars().all())
@@ -592,30 +790,97 @@ async def run_analysis_pipeline(db: AsyncSession, gateway: RealtimeGateway, anal
                 await set_subprocesses(db, gateway, analysis_id, project_id, phase, subprocesses)
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "load_proposals", "completed", {"proposals": str(len(run_fixes))})
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "apply_disposable_patch", "running")
-                validated = await _validate_run_fixes(db, project, run_fixes)
-                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "apply_disposable_patch", "completed", {"validated": str(validated)})
-                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "run_validation", "completed", {"validated": str(validated), "proposals": str(len(run_fixes))})
-                await add_log(db, gateway, analysis_id, project_id, "WARN", "Regression Check",
-                              f"Stub phase: validated {validated}/{len(run_fixes)} proposal(s). "
-                              f"Full regression suite (concurrency/DB/contract checks) not implemented yet.", phase.id)
+                run_regression_results = await _run_regression_validation(db, project, run_fixes)
+                passed_count = sum(1 for r in run_regression_results.values() if r["passed"])
+                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "apply_disposable_patch", "completed", {"validated": str(len(run_regression_results))})
+                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "run_validation", "completed", {"passed": str(passed_count), "failed": str(len(run_regression_results) - passed_count)})
 
-            # Phase 10: Validation & Iteration — STUB (Job 6). No loop
-            # controller yet: the run always completes after one pass, no
-            # FixAttempt rows are created, and the max-attempt / same-error
-            # fingerprint-guard branching described in the frontend design
-            # isn't wired up. Placeholder so the phase renders and the run
-            # still reaches AnalysisStatus.COMPLETED as before.
+                for fix in run_fixes:
+                    result = run_regression_results.get(fix.bugId)
+                    if result is None:
+                        continue
+                    attempt_stmt = select(FixAttempt).where(FixAttempt.fixProposalId == fix.id)
+                    attempt = (await db.execute(attempt_stmt)).scalar_one_or_none()
+                    if attempt is None:
+                        continue
+                    attempt.resultStatus = FixAttemptResult.pass_ if result["passed"] else FixAttemptResult.fail
+                    if not result["passed"]:
+                        attempt.errorFingerprint = fingerprint(result["stderr"] or result["stdout"] or "validation failed")
+                        attempt.rawErrorOutput = (result["stderr"] or result["stdout"])[:8000]
+                await db.commit()
+
+                await add_log(db, gateway, analysis_id, project_id, "PASS" if passed_count == len(run_regression_results) else "WARN",
+                              "Regression Check", f"{passed_count}/{len(run_regression_results)} patch(es) passed validation", phase.id)
+
+            # Phase 10: Validation & Iteration — REAL (Job 6). The loop
+            # controller: for every bug still failing after Phase 9, retries
+            # via _retry_bug_until_pass_or_exhausted up to run.maxAttempts,
+            # honoring the same-error fingerprint short-circuit. Bugs that
+            # still fail after the loop (exhausted or short-circuited) push
+            # the whole run to NEEDS_HUMAN_REVIEW instead of COMPLETED.
             if definition["number"] == 10:
-                subprocesses = [{
-                    "id": "loop_controller_stub",
-                    "name": "Loop controller (Job 6 pending — single-pass only)",
-                    "completed": True,
-                    "status": "completed",
-                    "category": "validation",
-                }]
+                subprocesses = _phase_steps([
+                    ("evaluate_results", "Evaluate pass/fail per bug", "validation"),
+                    ("retry_loop", "Retry failing bugs (bounded)", "validation"),
+                    ("finalize", "Finalize run outcome", "validation"),
+                ])
                 await set_subprocesses(db, gateway, analysis_id, project_id, phase, subprocesses)
-                await add_log(db, gateway, analysis_id, project_id, "WARN", "Validation & Iteration",
-                              "Stub phase: no retry loop yet — this run always ends after one pass.", phase.id)
+                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "evaluate_results", "running")
+
+                failing_bug_ids = [bug_id for bug_id, r in run_regression_results.items() if not r["passed"]]
+                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "evaluate_results", "completed",
+                                          {"failing": str(len(failing_bug_ids)), "passing": str(len(run_regression_results) - len(failing_bug_ids))})
+
+                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "retry_loop", "running")
+                fixed_on_retry: list[str] = []
+                same_error: list[str] = []
+                exhausted: list[str] = []
+
+                for bug_id in failing_bug_ids:
+                    bug = await db.get(Bug, bug_id)
+                    if bug is None:
+                        continue
+                    attempt_stmt = (
+                        select(FixAttempt)
+                        .where(FixAttempt.bugId == bug_id, FixAttempt.analysisRunId == analysis_id)
+                        .order_by(FixAttempt.attemptNumber.desc())
+                    )
+                    latest_attempt = (await db.execute(attempt_stmt)).scalars().first()
+                    if latest_attempt is None:
+                        continue
+
+                    outcome = await _retry_bug_until_pass_or_exhausted(
+                        db, gateway, analysis_id, project_id, project, bug, latest_attempt, run.maxAttempts,
+                    )
+                    if outcome == "passed":
+                        fixed_on_retry.append(bug_id)
+                        bug.status = BugStatus.Fixed
+                    elif outcome == "same_error":
+                        same_error.append(bug_id)
+                        bug.status = BugStatus.InReview
+                    else:
+                        exhausted.append(bug_id)
+                        bug.status = BugStatus.InReview
+                await db.commit()
+
+                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "retry_loop", "completed", {
+                    "fixedOnRetry": str(len(fixed_on_retry)),
+                    "sameErrorShortCircuit": str(len(same_error)),
+                    "attemptsExhausted": str(len(exhausted)),
+                })
+
+                needs_human = bool(same_error or exhausted)
+                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "finalize", "completed", {"needsHumanReview": str(needs_human)})
+
+                if needs_human:
+                    run.status = AnalysisStatus.NEEDS_HUMAN_REVIEW
+                    await add_log(db, gateway, analysis_id, project_id, "WARN", "Validation & Iteration",
+                                  f"{len(same_error) + len(exhausted)} bug(s) still failing after the retry loop "
+                                  f"({len(same_error)} same-error short-circuit, {len(exhausted)} attempts exhausted) — needs human review.", phase.id)
+                else:
+                    extra = f" ({len(fixed_on_retry)} fixed via retry)" if fixed_on_retry else ""
+                    await add_log(db, gateway, analysis_id, project_id, "PASS", "Validation & Iteration",
+                                  f"All bugs passed validation{extra}.", phase.id)
 
             await _set_phase_status(db, phase, PhaseStatus.COMPLETED)
             await gateway.publish(
@@ -627,14 +892,47 @@ async def run_analysis_pipeline(db: AsyncSession, gateway: RealtimeGateway, anal
             await add_log(db, gateway, analysis_id, project_id, "PASS", definition["name"],
                           f"{definition['name']} completed", phase.id)
 
-        run.status = AnalysisStatus.COMPLETED
+            # Phase 8 real pause (Job 5): build/test just passed and the
+            # phase is now marked COMPLETED by the shared tail above --
+            # stop here instead of falling through to Phase 9. The task
+            # ends successfully (not an error); resume_analysis_pipeline()
+            # picks the run back up from Phase 9 once the user acts on the
+            # checkpoint (or the resume endpoint is called directly).
+            if definition["number"] == 8:
+                checkpoint = PreviewCheckpoint(
+                    analysisRunId=analysis_id,
+                    status=CheckpointStatus.awaiting_decision,
+                    promptMessages=[],
+                    fileEditsDetected=[],
+                )
+                db.add(checkpoint)
+                run.status = AnalysisStatus.AWAITING_REVIEW
+                await db.commit()
+
+                await gateway.publish(
+                    project_id,
+                    {"type": "analysis.awaiting_review", "projectId": project_id, "analysisId": analysis_id,
+                     "payload": {"analysisId": analysis_id, "checkpointId": checkpoint.id}},
+                )
+                await add_log(db, gateway, analysis_id, project_id, "PASS", "Preview Checkpoint",
+                              "Build and tests passed — paused for review. Waiting for you to continue, "
+                              "before moving on to Regression Check.", phase.id)
+                return
+
+
+        # Job 6: Phase 10 may already have set NEEDS_HUMAN_REVIEW when the
+        # retry loop couldn't get every bug passing -- don't clobber that
+        # back to COMPLETED.
+        if run.status != AnalysisStatus.NEEDS_HUMAN_REVIEW:
+            run.status = AnalysisStatus.COMPLETED
         run.completedAt = datetime.now(timezone.utc)
         project.status = ProjectStatus.READY
         await db.commit()
 
         await gateway.publish(
             project_id,
-            {"type": "analysis.completed", "projectId": project_id, "analysisId": analysis_id, "payload": {"analysisId": analysis_id}},
+            {"type": "analysis.completed" if run.status == AnalysisStatus.COMPLETED else "analysis.needs_review",
+             "projectId": project_id, "analysisId": analysis_id, "payload": {"analysisId": analysis_id}},
         )
 
     except Exception as exc:  # noqa: BLE001
@@ -659,3 +957,67 @@ async def run_analysis_pipeline(db: AsyncSession, gateway: RealtimeGateway, anal
             {"type": "analysis.failed", "projectId": project_id, "analysisId": analysis_id, "payload": {"message": message}},
         )
         raise
+
+
+async def resume_analysis_pipeline(
+    db: AsyncSession,
+    gateway: RealtimeGateway,
+    analysis_id: str,
+    project_id: str,
+) -> None:
+    """Job 5: resumes a run paused at the Phase 8 Preview Checkpoint.
+    Called by the analysis.resume Celery task (see workers/celery_app.py),
+    dispatched from POST /analysis/{id}/checkpoint/resume."""
+    run = await db.get(AnalysisRun, analysis_id)
+    if run is None:
+        raise PipelineError("Analysis run not found")
+    if run.status != AnalysisStatus.AWAITING_REVIEW:
+        raise PipelineError(
+            f"Analysis run is not awaiting review (current status: {run.status.value}) -- "
+            "nothing to resume."
+        )
+
+    checkpoint_stmt = select(PreviewCheckpoint).where(PreviewCheckpoint.analysisRunId == analysis_id)
+    checkpoint = (await db.execute(checkpoint_stmt)).scalar_one_or_none()
+    if checkpoint is not None:
+        checkpoint.status = CheckpointStatus.resumed
+        checkpoint.resumedAt = datetime.now(timezone.utc)
+        await db.commit()
+
+    # run.status flips back to RUNNING inside run_analysis_pipeline itself
+    # (same line that handles a fresh run) -- start_from_phase=9 skips the
+    # already-COMPLETED phases 1-8 and picks up at Regression Check.
+    await run_analysis_pipeline(db, gateway, analysis_id, project_id, start_from_phase=9)
+
+
+async def reject_checkpoint(
+    db: AsyncSession,
+    gateway: RealtimeGateway,
+    analysis_id: str,
+    project_id: str,
+) -> None:
+    """Job 5: the other checkpoint decision -- the user reviewed the
+    preview and doesn't want to continue. Ends the run as CANCELLED rather
+    than resuming into Regression Check."""
+    run = await db.get(AnalysisRun, analysis_id)
+    if run is None:
+        raise PipelineError("Analysis run not found")
+    if run.status != AnalysisStatus.AWAITING_REVIEW:
+        raise PipelineError(
+            f"Analysis run is not awaiting review (current status: {run.status.value})."
+        )
+
+    checkpoint_stmt = select(PreviewCheckpoint).where(PreviewCheckpoint.analysisRunId == analysis_id)
+    checkpoint = (await db.execute(checkpoint_stmt)).scalar_one_or_none()
+    if checkpoint is not None:
+        checkpoint.status = CheckpointStatus.rejected
+
+    run.status = AnalysisStatus.CANCELLED
+    run.completedAt = datetime.now(timezone.utc)
+    run.errorMessage = "Cancelled at Preview Checkpoint"
+    await db.commit()
+
+    await gateway.publish(
+        project_id,
+        {"type": "analysis.cancelled", "projectId": project_id, "analysisId": analysis_id, "payload": {"analysisId": analysis_id}},
+    )

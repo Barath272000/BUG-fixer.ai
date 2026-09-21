@@ -7,19 +7,27 @@ from app.db.session import get_db
 from app.modules.analysis.schemas import (
     AnalysisRunDetailOut,
     AnalysisRunOut,
+    CheckpointFileEditIn,
+    CheckpointPromptIn,
     PipelineLogOut,
+    PreviewCheckpointOut,
     RecentAnalysisResponse,
 )
 from app.modules.analysis.service import (
+    append_checkpoint_file_edit,
+    append_checkpoint_prompt,
     cancel_analysis,
     clear_all_analysis_runs,
     clear_analysis_runs,
     count_analysis_runs,
     create_analysis,
     get_analysis,
+    get_checkpoint,
     list_analyses,
     list_logs,
     list_recent_analyses,
+    reject_checkpoint,
+    resume_checkpoint,
 )
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
@@ -118,3 +126,64 @@ async def cancel(
 ):
     run = await cancel_analysis(db, current_user.id, analysis_id)
     return AnalysisRunOut.model_validate(run)
+
+
+@router.get("/{analysis_id}/checkpoint", response_model=PreviewCheckpointOut)
+async def checkpoint(
+    analysis_id: str,
+    current_user: AuthUser = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    """Job 5: the dashboard polls this (or listens for analysis.awaiting_review
+    on the websocket) once a run reaches Phase 8 to know it's paused."""
+    cp = await get_checkpoint(db, current_user.id, analysis_id)
+    return PreviewCheckpointOut.model_validate(cp)
+
+
+@router.post("/{analysis_id}/checkpoint/resume", response_model=AnalysisRunOut)
+async def checkpoint_resume(
+    analysis_id: str,
+    current_user: AuthUser = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    """Job 5: the "Continue" action on the Preview Checkpoint card --
+    dispatches analysis.resume, which continues at Phase 9 (Regression Check)."""
+    run = await resume_checkpoint(db, current_user.id, analysis_id)
+    return AnalysisRunOut.model_validate(run)
+
+
+@router.post("/{analysis_id}/checkpoint/reject", response_model=AnalysisRunOut)
+async def checkpoint_reject(
+    analysis_id: str,
+    current_user: AuthUser = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    """Job 5: the other checkpoint action -- ends the run as CANCELLED
+    instead of continuing into Regression Check."""
+    run = await reject_checkpoint(db, current_user.id, analysis_id)
+    return AnalysisRunOut.model_validate(run)
+
+
+@router.post("/{analysis_id}/checkpoint/prompt", response_model=PreviewCheckpointOut)
+async def checkpoint_prompt(
+    analysis_id: str,
+    payload: CheckpointPromptIn,
+    current_user: AuthUser = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    """Job 7: the Preview Checkpoint's prompt pad -- appends the user's
+    message and a real AI reply, both in one call."""
+    cp = await append_checkpoint_prompt(db, current_user.id, analysis_id, payload.text)
+    return PreviewCheckpointOut.model_validate(cp)
+
+
+@router.post("/{analysis_id}/checkpoint/file-edit", response_model=PreviewCheckpointOut)
+async def checkpoint_file_edit(
+    analysis_id: str,
+    payload: CheckpointFileEditIn,
+    current_user: AuthUser = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    """Job 7: records a file edit detected on the live preview container."""
+    cp = await append_checkpoint_file_edit(db, current_user.id, analysis_id, payload.filePath, payload.diffSnippet, payload.newContent)
+    return PreviewCheckpointOut.model_validate(cp)

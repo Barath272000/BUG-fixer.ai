@@ -62,6 +62,31 @@ class RecentAnalysisResponse(BaseModel):
     stats: RecentAnalysisStats
 
 
+class PreviewCheckpointOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    analysisRunId: str
+    previewSessionId: str | None
+    status: str
+    promptMessages: list[dict] | None = None
+    fileEditsDetected: list[dict] | None = None
+    createdAt: datetime
+    resumedAt: datetime | None
+
+
+class CheckpointPromptIn(BaseModel):
+    """Job 7: one message typed into the Preview Checkpoint's prompt pad."""
+    text: str
+
+
+class CheckpointFileEditIn(BaseModel):
+    """Job 7: one file edit detected on the live preview container."""
+    filePath: str
+    diffSnippet: str
+    newContent: str | None = None
+
+
 class PipelineLogOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

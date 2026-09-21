@@ -8,7 +8,7 @@ from app.models.bug import Bug
 from app.models.enums import AIStatus, BugStatus, FixStatus, Provider
 from app.models.fix import FixProposal
 from app.models.project import Project
-from app.modules.ai.service import diagnose_bug
+from app.modules.ai.service import diagnose_root_cause, generate_patch
 from app.modules.fixes.patch_service import (
     apply_simple_replacement,
     count_changed_lines,
@@ -32,6 +32,11 @@ async def _assert_fix_access(db: AsyncSession, user_id: str, fix_id: str) -> Fix
 
 
 async def generate_fix(db: AsyncSession, user_id: str, bug_id: str, provider: str | None, model: str | None) -> FixProposal:
+    """On-demand entry point (POST /fixes/generate). Job 4: now genuinely
+    two separate AI calls -- diagnose_root_cause then generate_patch --
+    instead of one merged prompt, matching what Phase 5/6 do in the
+    pipeline. Root cause is folded into the stored explanation so nothing
+    the model diagnosed gets silently dropped."""
     stmt = select(Bug).join(Project, Bug.projectId == Project.id).where(
         Bug.id == bug_id, Project.ownerId == user_id
     )
@@ -39,22 +44,26 @@ async def generate_fix(db: AsyncSession, user_id: str, bug_id: str, provider: st
     if bug is None:
         raise AppError(404, "BUG_NOT_FOUND", "Bug was not found")
 
-    diagnosis = await diagnose_bug(db, user_id, bug.projectId, bug.id, provider, model)
+    diagnosis = await diagnose_root_cause(db, user_id, bug.projectId, bug.id, provider, model)
+    patch = await generate_patch(db, user_id, bug.projectId, bug.id, diagnosis, diagnosis["provider"], diagnosis["model"])
+
+    root_cause = diagnosis.get("rootCause", "")
+    explanation = f"Root cause: {root_cause}\n\n{diagnosis['explanation']}" if root_cause else diagnosis["explanation"]
 
     fix = FixProposal(
         bugId=bug.id,
         projectId=bug.projectId,
-        provider=Provider(diagnosis["provider"]),
-        model=diagnosis["model"],
+        provider=Provider(patch["provider"]),
+        model=patch["model"],
         confidence=diagnosis["confidence"],
-        explanation=diagnosis["explanation"],
-        patchSummary=diagnosis["patchSummary"],
-        unifiedDiff=diagnosis["unifiedDiff"],
-        originalCode=diagnosis.get("originalCode"),
-        proposedCode=diagnosis.get("proposedCode"),
+        explanation=explanation,
+        patchSummary=patch["patchSummary"],
+        unifiedDiff=patch["unifiedDiff"],
+        originalCode=patch.get("originalCode"),
+        proposedCode=patch.get("proposedCode"),
         affectedFiles=diagnosis["affectedFiles"],
-        linesChanged=count_changed_lines(diagnosis["unifiedDiff"]),
-        estimatedMinutes=diagnosis["estimatedMinutes"],
+        linesChanged=count_changed_lines(patch["unifiedDiff"]),
+        estimatedMinutes=patch["estimatedMinutes"],
     )
     db.add(fix)
     await db.commit()
