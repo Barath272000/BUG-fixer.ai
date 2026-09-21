@@ -122,6 +122,7 @@ async def add_log(
     category: str,
     message: str,
     phase_id: str | None = None,
+    phase_number: int | None = None,
 ) -> PipelineLog:
     log = PipelineLog(
         analysisRunId=analysis_id,
@@ -146,6 +147,8 @@ async def add_log(
                 "level": log.level,
                 "category": log.category,
                 "message": log.message,
+                "phaseId": log.phaseId,
+                "phaseNumber": phase_number,
             },
         },
     )

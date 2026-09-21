@@ -88,10 +88,9 @@ class CheckpointFileEditIn(BaseModel):
 
 
 class PipelineLogOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
     id: str
     phaseId: str | None
+    phaseNumber: int | None = None
     timestamp: datetime
     level: str
     category: str

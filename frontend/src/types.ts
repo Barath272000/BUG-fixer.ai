@@ -160,6 +160,7 @@ export interface LogLine {
   level: 'INFO' | 'PASS' | 'WARN' | 'ERROR';
   category: string;
   message: string;
+  phaseNumber?: number;
 }
 
 export interface WorkspaceFile {

@@ -109,13 +109,24 @@ async def get(
 @router.get("/{analysis_id}/logs", response_model=list[PipelineLogOut])
 async def logs(
     analysis_id: str,
-    phase: int | None = Query(default=None, description="Filter to one phase by its number (1-8)"),
+    phase: int | None = Query(default=None, description="Filter to one phase by its number (1-10)"),
     limit: int = Query(default=1000, le=5000),
     current_user: AuthUser = Depends(require_auth),
     db: AsyncSession = Depends(get_db),
 ):
     rows = await list_logs(db, current_user.id, analysis_id, phase_number=phase, limit=limit)
-    return [PipelineLogOut.model_validate(r) for r in rows]
+    return [
+        PipelineLogOut(
+            id=r.id,
+            phaseId=r.phaseId,
+            phaseNumber=r.phase.number if r.phase else None,
+            timestamp=r.timestamp,
+            level=r.level,
+            category=r.category,
+            message=r.message,
+        )
+        for r in rows
+    ]
 
 
 @router.post("/{analysis_id}/cancel", response_model=AnalysisRunOut)

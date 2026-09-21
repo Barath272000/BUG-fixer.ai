@@ -82,13 +82,13 @@ async def list_logs(
 
     Reuses get_analysis's ownership join (raises 404 if the run doesn't exist
     or doesn't belong to owner_id) instead of duplicating that check here.
-    `phase_number` is the 1-8 phase number the frontend already works with
+    `phase_number` is the 1-10 phase number the frontend already works with
     (PipelinePhase.number), not the phase's internal uuid — we resolve it to
     the uuid ourselves since PipelineLog.phaseId stores the uuid.
     """
     await get_analysis(db, owner_id, analysis_id)
 
-    stmt = select(PipelineLog).where(PipelineLog.analysisRunId == analysis_id)
+    stmt = select(PipelineLog).where(PipelineLog.analysisRunId == analysis_id).options(selectinload(PipelineLog.phase))
 
     if phase_number is not None:
         phase_stmt = select(PipelinePhase.id).where(

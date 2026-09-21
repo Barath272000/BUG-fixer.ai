@@ -497,7 +497,7 @@ async def run_analysis_pipeline(
                  "payload": {"id": phase.id, "number": phase.number, "name": phase.name, "status": phase.status}},
             )
             await add_log(db, gateway, analysis_id, project_id, "INFO", definition["name"],
-                          f"Starting {definition['name']}", phase.id)
+                          f"Starting {definition['name']}", phase.id, phase.number)
 
             # Phase 1: extract/clone project source
             if definition["number"] == 1:
@@ -588,10 +588,10 @@ async def run_analysis_pipeline(
                 project.previewPort = preview_port
                 await db.commit()
                 await add_log(db, gateway, analysis_id, project_id, "PASS", "Project Setup",
-                              f"Detected {inspection['language']} with {inspection['framework']}", phase.id)
+                              f"Detected {inspection['language']} with {inspection['framework']}", phase.id, phase.number)
                 if preview_command:
                     await add_log(db, gateway, analysis_id, project_id, "INFO", "Project Setup",
-                                  f"Preview available: {preview_command} on port {preview_port}", phase.id)
+                                  f"Preview available: {preview_command} on port {preview_port}", phase.id, phase.number)
 
             # Phase 3: Static Analysis — REAL (Job 1). Zero-AI-cost linters,
             # run before the code is ever built/executed.
@@ -629,10 +629,10 @@ async def run_analysis_pipeline(
 
                 if report["supported"]:
                     await add_log(db, gateway, analysis_id, project_id, "PASS", "Static Analysis",
-                                  f"{len(report['findings'])} finding(s) across {len(report['tools'])} linter(s)", phase.id)
+                                  f"{len(report['findings'])} finding(s) across {len(report['tools'])} linter(s)", phase.id, phase.number)
                 else:
                     await add_log(db, gateway, analysis_id, project_id, "WARN", "Static Analysis",
-                                  f"No linters registered for {project.language or 'this language'} yet — skipped", phase.id)
+                                  f"No linters registered for {project.language or 'this language'} yet — skipped", phase.id, phase.number)
 
             # Phase 4: Error & Evidence Collection — STATIC-ONLY DESIGN
             # (confirmed, Job 3). Evidence is Phase 3's static-analysis
@@ -655,7 +655,7 @@ async def run_analysis_pipeline(
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "sync_bugs", "completed", {"totalEvidence": str(len(errors) + len(logged_bugs))})
                 await add_log(db, gateway, analysis_id, project_id, "PASS", "Error & Evidence Collection",
                               f"Evidence set for this run: {len(errors)} static-analysis finding(s) "
-                              f"+ {len(logged_bugs)} previously logged bug(s)", phase.id)
+                              f"+ {len(logged_bugs)} previously logged bug(s)", phase.id, phase.number)
 
             # Phase 5: AI Root Cause Analysis — REAL (Job 4). First of two
             # separate AI calls: diagnosis only, no patch (_diagnose_run_bugs
@@ -672,7 +672,7 @@ async def run_analysis_pipeline(
                 run_diagnoses = await _diagnose_run_bugs(db, project, analysis_id)
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "generate_diagnoses", "completed", {"diagnoses": str(len(run_diagnoses))})
                 await add_log(db, gateway, analysis_id, project_id, "PASS", "AI Root Cause Analysis",
-                              f"Generated {len(run_diagnoses)} AI root-cause diagnosis(es)", phase.id)
+                              f"Generated {len(run_diagnoses)} AI root-cause diagnosis(es)", phase.id, phase.number)
 
             # Phase 6: AI Patch Generation — REAL (Job 4). Second separate AI
             # call, grounded in Phase 5's settled diagnosis
@@ -690,7 +690,7 @@ async def run_analysis_pipeline(
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "synthesize_patches", "completed", {"patches": str(len(run_fixes))})
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "persist_proposals", "completed", {"proposals": str(len(run_fixes))})
                 await add_log(db, gateway, analysis_id, project_id, "PASS", "AI Patch Generation",
-                              f"Synthesized {len(run_fixes)} patch(es), attempt #1 recorded for each", phase.id)
+                              f"Synthesized {len(run_fixes)} patch(es), attempt #1 recorded for each", phase.id, phase.number)
 
             # Phase 7: Isolated Environment — REUSED from old Phase 3
             # (_run_isolated_environment, unchanged body). Moved from #3 -> #7.
@@ -699,7 +699,7 @@ async def run_analysis_pipeline(
                     db, gateway, analysis_id, project_id, phase, work_root, project.language,
                 )
                 await add_log(db, gateway, analysis_id, project_id, "PASS", "Isolated Environment",
-                              "Sandbox initialized and smoke-tested", phase.id)
+                              "Sandbox initialized and smoke-tested", phase.id, phase.number)
 
             # Phase 8: Install -> Build -> Run & Test — REUSED from old
             # Phase 4 (build) + Phase 5 (test), merged into one phase.
@@ -734,10 +734,10 @@ async def run_analysis_pipeline(
                     )
                     await create_bug_from_error(db, project, error)
                     await add_log(db, gateway, analysis_id, project_id, "ERROR", "Install & Build",
-                                  f"Build failed: {detail[:4000]}", phase.id)
+                                  f"Build failed: {detail[:4000]}", phase.id, phase.number)
                     raise PipelineError(f"Build failed: {detail[:2000]}")
                 await add_log(db, gateway, analysis_id, project_id, "PASS", "Install & Build",
-                              f"Build succeeded with {build_command}", phase.id)
+                              f"Build succeeded with {build_command}", phase.id, phase.number)
 
                 # --- Run & Test ---
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "detect_test_command", "running")
@@ -759,7 +759,7 @@ async def run_analysis_pipeline(
 
                 if summary.status == "NO_TESTS":
                     await add_log(db, gateway, analysis_id, project_id, "WARN", "Testing",
-                                  "Test command ran, but the project contains no discovered tests.", phase.id)
+                                  "Test command ran, but the project contains no discovered tests.", phase.id, phase.number)
                 elif test_result.code != 0:
                     detail = _command_failure_detail(test_result)
                     error = await record_error(
@@ -768,7 +768,7 @@ async def run_analysis_pipeline(
                     )
                     await create_bug_from_error(db, project, error)
                     await add_log(db, gateway, analysis_id, project_id, "ERROR", "Testing",
-                                  f"Tests failed: {detail[:4000]}", phase.id)
+                                  f"Tests failed: {detail[:4000]}", phase.id, phase.number)
                     raise PipelineError(f"Tests failed: {detail[:2000]}")
 
                 # Phase 8's TODO is resolved below, right after the shared
@@ -810,7 +810,7 @@ async def run_analysis_pipeline(
                 await db.commit()
 
                 await add_log(db, gateway, analysis_id, project_id, "PASS" if passed_count == len(run_regression_results) else "WARN",
-                              "Regression Check", f"{passed_count}/{len(run_regression_results)} patch(es) passed validation", phase.id)
+                              "Regression Check", f"{passed_count}/{len(run_regression_results)} patch(es) passed validation", phase.id, phase.number)
 
             # Phase 10: Validation & Iteration — REAL (Job 6). The loop
             # controller: for every bug still failing after Phase 9, retries
@@ -876,11 +876,11 @@ async def run_analysis_pipeline(
                     run.status = AnalysisStatus.NEEDS_HUMAN_REVIEW
                     await add_log(db, gateway, analysis_id, project_id, "WARN", "Validation & Iteration",
                                   f"{len(same_error) + len(exhausted)} bug(s) still failing after the retry loop "
-                                  f"({len(same_error)} same-error short-circuit, {len(exhausted)} attempts exhausted) — needs human review.", phase.id)
+                                  f"({len(same_error)} same-error short-circuit, {len(exhausted)} attempts exhausted) — needs human review.", phase.id, phase.number)
                 else:
                     extra = f" ({len(fixed_on_retry)} fixed via retry)" if fixed_on_retry else ""
                     await add_log(db, gateway, analysis_id, project_id, "PASS", "Validation & Iteration",
-                                  f"All bugs passed validation{extra}.", phase.id)
+                                  f"All bugs passed validation{extra}.", phase.id, phase.number)
 
             await _set_phase_status(db, phase, PhaseStatus.COMPLETED)
             await gateway.publish(
@@ -890,7 +890,7 @@ async def run_analysis_pipeline(
                              "durationMs": phase.durationMs}},
             )
             await add_log(db, gateway, analysis_id, project_id, "PASS", definition["name"],
-                          f"{definition['name']} completed", phase.id)
+                          f"{definition['name']} completed", phase.id, phase.number)
 
             # Phase 8 real pause (Job 5): build/test just passed and the
             # phase is now marked COMPLETED by the shared tail above --
@@ -916,7 +916,7 @@ async def run_analysis_pipeline(
                 )
                 await add_log(db, gateway, analysis_id, project_id, "PASS", "Preview Checkpoint",
                               "Build and tests passed — paused for review. Waiting for you to continue, "
-                              "before moving on to Regression Check.", phase.id)
+                              "before moving on to Regression Check.", phase.id, phase.number)
                 return
 
 
