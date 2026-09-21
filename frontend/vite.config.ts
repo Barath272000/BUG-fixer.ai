@@ -11,6 +11,7 @@ export default defineConfig({
   server: {
     port: 3000,
     host: '0.0.0.0',
+    open: true,
     // Vite 6+ rejects requests whose Host header it doesn't recognize.
     // Codespaces/devcontainer forwarding uses a rotating *.app.github.dev
     // (or *.preview.app.github.dev) hostname, so allow that suffix explicitly

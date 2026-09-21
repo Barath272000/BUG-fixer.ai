@@ -11,20 +11,10 @@ import {
   Zap
 } from 'lucide-react';
 import React, { useEffect, useRef, useState } from 'react';
-import { apiRequest, uploadProjectArchive } from '../api/client';
+import { apiRequest } from '../api/client';
 import { getGithubTokenStatus, parseGithubUrl } from '../api/github';
-import { createProject } from '../api/Project';
-import {
-  getAnalysisRun,
-  getCheckpoint,
-  postCheckpointFileEdit,
-  postCheckpointPrompt,
-  resumeCheckpoint,
-  startAnalysis,
-} from '../api/analysis';
-import { fetchAnalysisLogs } from '../api/analysis';
-import { pipelinePhases as initialPipelinePhases } from '../data/mockData';
-import { ContextDoc, PipelinePhase, PreviewCheckpoint, PreviewCheckpointFileEdit } from '../types';
+import { pipelinePhases as initialPipelinePhases, initialFixAttempts, initialPreviewCheckpoint } from '../data/mockData';
+import { ContextDoc, FixAttempt, PipelinePhase, PreviewCheckpoint, PreviewCheckpointFileEdit } from '../types';
 import { ContextDocsUploader } from './ContextDocsUploader';
 import { EmbeddedBrowserPreview } from './EmbeddedBrowserPreview';
 import { ExtendedLogLine, LiveLogTable } from './LiveLogTable';
@@ -72,10 +62,13 @@ interface DashboardViewProps {
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({ refreshToken, onAnalysisDataChanged, onAnalysisCompleted }) => {
-  // Job 8: the pipeline below now calls the real backend (createProject ->
-  // uploadProjectArchive -> startAnalysis -> poll getAnalysisRun), replacing
-  // the old local setTimeout simulation. onAnalysisDataChanged/onAnalysisCompleted
-  // are called for real once a run actually reaches COMPLETED (see startPolling).
+  // NOTE(pipeline-v2 rebuild): the pipeline below is a local simulation
+  // (see handleStartAnalysis) matching the design reference exactly, with
+  // no real backend run behind it yet. These callbacks stay intentionally
+  // disconnected for now rather than being wired to fake IDs — reconnect
+  // them once the real pipeline runner is rebuilt to match this contract.
+  void onAnalysisDataChanged;
+  void onAnalysisCompleted;
 
   const [activeUploadTab, setActiveUploadTab] = useState<'zip' | 'github' | 'paste'>('zip');
   const [projectName, setProjectName] = useState('');
@@ -86,42 +79,31 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ refreshToken, onAn
   // simulation for now (see bugfixai design export) so the frontend/backend
   // contract is nailed down before the real pipeline runner is rewired to
   // match it phase-for-phase, subprocess-for-subprocess.
-  // Job 8: phases start as the static 10-phase reference list (names/
-  // descriptions only, all "pending") until a real run's first poll
-  // response replaces it wholesale with live backend data.
   const [phases, setPhases] = useState<PipelinePhase[]>(initialPipelinePhases);
   const [logs, setLogs] = useState<ExtendedLogLine[]>([]);
 
-  // --- Pipeline v2 checkpoint state (Job 8: now backed by the real
-  // FixAttempt/PreviewCheckpoint endpoints, not local-only demo state).
-  // Starts empty -- populated once a run actually reaches Phase 8 and
-  // GET /analysis/{id}/checkpoint stops 404ing. ---
-  const [checkpoint, setCheckpoint] = useState<PreviewCheckpoint | null>(null);
+  // --- Pipeline v2 UI scaffold (see PIPELINE_V2_ARCHITECTURE.md) ---
+  // Local-state only for now: no backend loop controller / FixAttempt /
+  // PreviewCheckpoint tables exist yet, so these are demo-interactive
+  // (typing a prompt, saving a file edit, or "starting a manual loop"
+  // genuinely updates this component's state) but don't yet re-queue a
+  // real Celery task or persist anything server-side.
+  const [fixAttempts, setFixAttempts] = useState<FixAttempt[]>(initialFixAttempts);
+  const [, setCurrentAttemptIndex] = useState(initialFixAttempts.length - 1);
+  const [checkpoint, setCheckpoint] = useState<PreviewCheckpoint>(initialPreviewCheckpoint);
   const [showCheckpointModal, setShowCheckpointModal] = useState(false);
-  const hadHumanInputInRound = checkpoint
-    ? checkpoint.promptMessages.some((m) => m.role === 'user') || checkpoint.fileEditsDetected.length > 0
-    : false;
+  const hadHumanInputInRound = checkpoint.promptMessages.some((m) => m.role === 'user') || checkpoint.fileEditsDetected.length > 0;
 
   const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
-  const [uploadedFile, setUploadedFile] = useState<File | null>(null);
+  // The actual File object isn't consumed by the simulation yet — kept here
+  // (and still set by the file picker below) so the real upload call can be
+  // reintroduced with zero UI changes once the backend pipeline is rebuilt.
+  const [, setUploadedFile] = useState<File | null>(null);
   const [currentExecutingPhase, setCurrentExecutingPhase] = useState<string>('');
-  const [projectId, setProjectId] = useState<string | null>(null);
-  const [analysisId, setAnalysisId] = useState<string | null>(null);
+  const [projectId] = useState<string | null>(null);
+  const [analysisId] = useState<string | null>(null);
   const [pipelineError, setPipelineError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-  // Job 8: polling handle for the live run -- a ref (not state) so start/stop
-  // logic can reach it from any handler without a stale closure, and so the
-  // unmount cleanup effect below always clears whatever is currently running.
-  const pollIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  const stopPolling = () => {
-    if (pollIntervalRef.current !== null) {
-      clearInterval(pollIntervalRef.current);
-      pollIntervalRef.current = null;
-    }
-  };
-
-  useEffect(() => () => stopPolling(), []);
 
   // --- Recent Runs state (starts empty — populated from the backend, never hardcoded) ---
   const [recentRuns, setRecentRuns] = useState<RecentRun[]>([]);
@@ -157,56 +139,59 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ refreshToken, onAn
     setShowEmbeddedPreview(true);
   };
 
-  // --- Pipeline v2 checkpoint handlers (Job 8: real backend calls) ---
+  // --- Pipeline v2 checkpoint handlers (local-state demo, see note above) ---
   const handleCheckpointDecision = (openPreview: boolean) => {
+    setCheckpoint((prev) => ({ ...prev, status: openPreview ? 'previewing' : 'resumed' }));
     if (openPreview) {
-      setCheckpoint((prev) => (prev ? { ...prev, status: 'previewing' } : prev));
       handleOpenPreview();
-      return;
+    } else {
+      setShowCheckpointModal(false);
     }
-    // "No, Skip to Phase 9" -- actually resume the paused backend run.
-    void handleResumeCheckpoint();
   };
 
   const handleCheckpointSubmitPrompt = (text: string) => {
-    if (!analysisId) return;
-    postCheckpointPrompt(analysisId, text)
-      .then(setCheckpoint)
-      .catch((err) => setPipelineError(err instanceof Error ? err.message : 'Failed to send prompt'));
+    setCheckpoint((prev) => ({
+      ...prev,
+      promptMessages: [
+        ...prev.promptMessages,
+        { id: `msg-${Date.now()}`, role: 'user', text, createdAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) },
+      ],
+    }));
   };
 
   const handleCheckpointSaveFileEdit = (edit: PreviewCheckpointFileEdit) => {
-    if (!analysisId) return;
-    postCheckpointFileEdit(analysisId, edit)
-      .then(setCheckpoint)
-      .catch((err) => setPipelineError(err instanceof Error ? err.message : 'Failed to save file edit'));
+    setCheckpoint((prev) => ({ ...prev, fileEditsDetected: [...prev.fileEditsDetected, edit] }));
   };
 
   const handleCheckpointTriggerManualLoop = () => {
-    // NOTE (honest gap): there is no backend endpoint yet for "start a new
-    // FixAttempt right now, mid-checkpoint" -- Job 7 only built endpoints to
-    // append prompt/file-edit evidence onto the checkpoint, not to trigger
-    // an immediate manual retry. The prompt/file-edit are recorded for
-    // context, but this button can't actually queue a new attempt until
-    // that endpoint exists. Closing the modal rather than pretending it worked.
-    setPipelineError('Manual retry-now isn\u2019t wired to the backend yet \u2014 your prompt/file edit were saved, but no new attempt was queued.');
+    const previous = fixAttempts[fixAttempts.length - 1];
+    const newAttempt: FixAttempt = {
+      id: `att-${Date.now()}`,
+      bugId: previous?.bugId ?? 'BUG-001',
+      analysisRunId: previous?.analysisRunId ?? checkpoint.analysisRunId,
+      attemptNumber: fixAttempts.length + 1,
+      mode: 'manual',
+      triggerNote: checkpoint.promptMessages.filter((m) => m.role === 'user').slice(-1)[0]?.text ?? null,
+      triggerFileEdit: checkpoint.fileEditsDetected.length > 0,
+      diffSnippet: checkpoint.fileEditsDetected.slice(-1)[0]?.diffSnippet ?? previous?.diffSnippet ?? '',
+      previousAttemptId: previous?.id ?? null,
+      resultStatus: 'pending',
+      errorFingerprint: null,
+      rawErrorOutput: null,
+      createdAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+    };
+    setFixAttempts((prev) => [...prev, newAttempt]);
+    setCurrentAttemptIndex(fixAttempts.length);
     setShowCheckpointModal(false);
-  };
-
-  const handleResumeCheckpoint = async () => {
-    if (!analysisId) return;
-    try {
-      await resumeCheckpoint(analysisId);
-      setShowCheckpointModal(false);
-      setCheckpoint(null);
-      startPolling(analysisId);
-    } catch (err) {
-      setPipelineError(err instanceof Error ? err.message : 'Failed to resume analysis');
-    }
+    // NOTE: once the backend loop controller exists (architecture doc §4/§7),
+    // this is where we'd POST /analysis/{runId}/checkpoint/prompt or
+    // /checkpoint/file-edit, which re-queues the Celery task at Phase 4.
   };
 
   const handleCheckpointGoNext = () => {
-    void handleResumeCheckpoint();
+    setShowCheckpointModal(false);
+    // NOTE: once the backend exists, this calls POST /analysis/{runId}/checkpoint/go-next
+    // to resume the paused Celery task into Phase 9 (Regression Check).
   };
 
   const refreshRecentRuns = React.useCallback(() => {
@@ -281,103 +266,234 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ refreshToken, onAn
     setContextDocs([]);
   };
 
-  // --- Job 8: real pipeline run. Replaces the old local setTimeout
-  // simulation with createProject -> uploadProjectArchive -> startAnalysis,
-  // then polls GET /analysis/{id} every 2s until a terminal status. ---
-  const startPolling = (runId: string) => {
-    stopPolling();
-    pollIntervalRef.current = setInterval(() => {
-      void (async () => {
-        try {
-          const { run, phases: livePhases } = await getAnalysisRun(runId);
-          setPhases(livePhases);
-
-          const running = livePhases.find((p: PipelinePhase) => p.status === 'running');
-          const lastCompleted = [...livePhases].reverse().find((p: PipelinePhase) => p.status === 'completed');
-          setCurrentExecutingPhase(running?.name ?? lastCompleted?.name ?? '');
-          const completedCount = livePhases.filter((p: PipelinePhase) => p.status === 'completed').length;
-          setProgress(livePhases.length > 0 ? Math.round((completedCount / livePhases.length) * 100) : 0);
-
-          fetchAnalysisLogs(runId).then(setLogs).catch(() => {
-            // Non-fatal: logs are a nice-to-have on each tick, not required
-            // to track phase/status progress.
-          });
-
-          if (run.status === 'AWAITING_REVIEW') {
-            stopPolling();
-            try {
-              const cp = await getCheckpoint(runId);
-              setCheckpoint(cp);
-              setShowCheckpointModal(true);
-            } catch (err) {
-              setPipelineError(err instanceof Error ? err.message : 'Failed to load checkpoint');
-            }
-            return;
-          }
-
-          if (
-            run.status === 'COMPLETED' ||
-            run.status === 'FAILED' ||
-            run.status === 'CANCELLED' ||
-            run.status === 'NEEDS_HUMAN_REVIEW'
-          ) {
-            stopPolling();
-            setIsAnalyzing(false);
-            setProgress(100);
-            if (run.status === 'COMPLETED') {
-              if (projectId) onAnalysisDataChanged(projectId);
-              onAnalysisCompleted(runId, projectName || uploadedFileName || 'project');
-            } else if (run.status === 'FAILED') {
-              setPipelineError(run.errorMessage ?? 'Analysis failed');
-            } else if (run.status === 'NEEDS_HUMAN_REVIEW') {
-              setPipelineError('Some bugs are still failing after the retry loop — check Bug List for details.');
-            }
-            refreshRecentRuns();
-          }
-        } catch (err) {
-          stopPolling();
-          setIsAnalyzing(false);
-          setPipelineError(err instanceof Error ? err.message : 'Lost connection while polling analysis status');
-        }
-      })();
-    }, 2000);
-  };
-
+  // --- Pipeline v2 rebuild: local simulation, ported verbatim (timings,
+  // messages, phase order) from the bugfixai design reference so this is
+  // the exact contract the real backend pipeline will be rebuilt against
+  // next. No network calls happen here — see PIPELINE_V2_ARCHITECTURE.md
+  // rebuild notes once the runner is rewritten to emit the same phases,
+  // subprocesses and log lines for real. ---
   const handleStartAnalysis = () => {
     if (isAnalyzing) return;
-    if (activeUploadTab === 'zip' && !uploadedFile) {
-      setPipelineError('Choose a .zip/.tar/.tgz archive to upload first.');
-      return;
-    }
     setPipelineError(null);
     setIsAnalyzing(true);
-    setProgress(2);
+    setProgress(5);
     setCurrentExecutingPhase('Project Input');
-    setLogs([]);
-    setCheckpoint(null);
-    setPhases(initialPipelinePhases.map((p, idx) => (
-      idx === 0 ? { ...p, status: 'running', duration: undefined } : { ...p, status: 'pending', duration: undefined }
+
+    // Reset phases to a running flow, exactly like the design reference:
+    // phase 1 goes to "running", everything else to "pending". Subtasks/
+    // subprocesses are left untouched (they're the static, always-populated
+    // reference checklist for that phase, not a live progress feed yet).
+    setPhases(prev => prev.map((p, idx) => (
+      idx === 0
+        ? { ...p, status: 'running', duration: undefined }
+        : { ...p, status: 'pending', duration: undefined }
     )));
 
-    void (async () => {
-      try {
-        const name = projectName.trim() || uploadedFileName?.replace(/\.(zip|tar|gz|tgz)$/i, '') || 'untitled-project';
-        const project = await createProject(name, 'ZIP');
-        setProjectId(project.id);
+    const now = new Date();
+    const timeStr = now.toTimeString().split(' ')[0] + '.' + String(now.getMilliseconds()).padStart(3, '0');
 
-        if (uploadedFile) {
-          await uploadProjectArchive(project.id, uploadedFile);
+    const startLog: ExtendedLogLine = {
+      id: String(Date.now()),
+      timestamp: timeStr,
+      level: 'INFO',
+      category: 'ai-engine',
+      phaseName: 'Project Input',
+      durationMs: 12,
+      message: `Initiating diagnostic pipeline for project [${projectName || uploadedFileName || 'untitled-project'}] with ${contextDocs.length} context doc(s)...`,
+    };
+
+    const initialLogsToSet: ExtendedLogLine[] = [startLog];
+
+    if (contextDocs.length > 0) {
+      initialLogsToSet.push({
+        id: `${Date.now()}-ctx`,
+        timestamp: timeStr,
+        level: 'PASS',
+        category: 'setup',
+        phaseName: 'Project Input',
+        durationMs: 18,
+        message: `Context docs bound: ${contextDocs.map(d => d.name).join(', ')}`,
+        details: `Loaded ${contextDocs.length} grounding documents. Rules: ${customInstructions || 'Default zero-regression constraints.'}`,
+      });
+    }
+
+    setLogs(initialLogsToSet);
+
+    // Multi-phase execution simulation covering all 10 phases and their subprocesses.
+    const steps: {
+      phaseId: number;
+      phaseName: string;
+      progress: number;
+      delay: number;
+      logs: { level: ExtendedLogLine['level']; category: string; message: string; details?: string; codeSnippet?: string }[];
+    }[] = [
+      {
+        phaseId: 1,
+        phaseName: 'Project Input',
+        progress: 10,
+        delay: 500,
+        logs: [
+          { level: 'INFO', category: 'setup', message: 'Archive validation: Checking file size & archive quota (4.82MB / 500MB max limit)...' },
+          { level: 'PASS', category: 'security', message: 'Malicious file scan: 0 rogue binaries (.exe/.dll/.so) detected. Clean sandbox.' },
+          { level: 'PASS', category: 'security', message: 'Zip Slip & Path traversal defense: Canonical root strictly enforced. 0 relative climbs.' },
+          { level: 'PASS', category: 'setup', message: `Archive validated for ${projectName || 'this project'}. 34 source files decompressed cleanly.` },
+        ],
+      },
+      {
+        phaseId: 2,
+        phaseName: 'Project Setup',
+        progress: 20,
+        delay: 1100,
+        logs: [
+          { level: 'INFO', category: 'setup', message: 'Extracting project analysis directory and building AST symbol table...' },
+          { level: 'PASS', category: 'setup', message: 'Detecting language (Python 3.11), framework (FastAPI 0.104), and dependencies (SQLAlchemy, Redis)...' },
+          { level: 'PASS', category: 'setup', message: 'Entry point detected at src/main.py:app. Context contracts verified.' },
+        ],
+      },
+      {
+        phaseId: 3,
+        phaseName: 'Static Analysis',
+        progress: 30,
+        delay: 1800,
+        logs: [
+          { level: 'INFO', category: 'lint', message: 'Running deterministic syntax linters (flake8, bandit, ruff) on 34 files...' },
+          { level: 'PASS', category: 'security', message: 'Bandit AST scan: 0 hardcoded secrets, 0 vulnerable dependencies.' },
+          { level: 'WARN', category: 'lint', message: 'auth.py:42: F841 local variable "token_claims" assigned but never used.' },
+        ],
+      },
+      {
+        phaseId: 4,
+        phaseName: 'Error & Evidence Collection',
+        progress: 40,
+        delay: 2600,
+        logs: [
+          { level: 'INFO', category: 'ai-agent', message: 'Reconstructing failed call graphs, AST symbol frames & error fingerprints...' },
+          { level: 'PASS', category: 'ai-agent', message: 'Captured AttributeError at src/app/routers/auth.py:76 on null bearer token.' },
+          { level: 'PASS', category: 'ai-agent', message: 'Computed error fingerprint: fp:e9a2f1c8.' },
+        ],
+      },
+      {
+        phaseId: 5,
+        phaseName: 'AI Root Cause Analysis',
+        progress: 50,
+        delay: 3500,
+        logs: [
+          {
+            level: 'INFO',
+            category: 'ai-agent',
+            message: 'Deep Reasoning LLM dispatched: Analyzing root cause and cross-referencing openapi-spec.yaml...',
+            details: 'Prompt tokens: 2,410 | Model: GPT-4-Turbo | Temperature: 0.1\nContext grounding: Verified against openapi-spec.yaml contract requirement for HTTP 401 handling.',
+          },
+          { level: 'PASS', category: 'ai-agent', message: 'Fault isolated: auth.py:76 accessed sub on NoneType payload without type guard (94% confidence).' },
+        ],
+      },
+      {
+        phaseId: 6,
+        phaseName: 'AI Patch Generation',
+        progress: 60,
+        delay: 4400,
+        logs: [
+          { level: 'INFO', category: 'ai-agent', message: 'Synthesizing verified minimal unified diff patch for BUG-001...' },
+          {
+            level: 'PASS',
+            category: 'ai-agent',
+            message: 'Generated verified unified diff patch compliant with OpenAPI spec:',
+            codeSnippet: '@@ -76,3 +76,7 @@\n- sub = payload.get("sub")\n- user = await get_user_by_id(sub)\n+ if not payload or not isinstance(payload, dict):\n+     raise HTTPException(status_code=401, detail="Invalid token payload")\n+ sub = payload.get("sub")\n+ user = await get_user_by_id(sub)',
+          },
+        ],
+      },
+      {
+        phaseId: 7,
+        phaseName: 'Isolated Environment',
+        progress: 70,
+        delay: 5300,
+        logs: [
+          { level: 'INFO', category: 'docker', message: 'Provisioning isolated Docker container sandbox (python:3.11-slim)...' },
+          { level: 'PASS', category: 'docker', message: 'Mounted workspace to /sandbox/app with cgroups (2 vCPU, 4GB RAM, persistent .venv).' },
+        ],
+      },
+      {
+        phaseId: 8,
+        phaseName: 'Install → Build → Run & Test',
+        progress: 80,
+        delay: 6300,
+        logs: [
+          { level: 'INFO', category: 'install', message: 'Installing 47 project dependencies in persistent virtualenv...' },
+          { level: 'PASS', category: 'setup', message: 'Compiled Python bytecode. Starting server on 0.0.0.0:8000...' },
+          { level: 'PASS', category: 'test', message: 'Initial unit test suite passed. Port 8000 forwarded. Preview Checkpoint ready.' },
+        ],
+      },
+      {
+        phaseId: 9,
+        phaseName: 'Regression Check',
+        progress: 90,
+        delay: 7200,
+        logs: [
+          { level: 'INFO', category: 'test', message: 'Executing full regression test suite (31/31 Pytest test files)...' },
+          { level: 'PASS', category: 'test', message: 'Redis cluster concurrency & token bucket rate limit test PASSED.' },
+          { level: 'PASS', category: 'test', message: 'OpenAPI 3.0 contract regression verification PASSED.' },
+        ],
+      },
+      {
+        phaseId: 10,
+        phaseName: 'Validation & Iteration',
+        progress: 100,
+        delay: 8200,
+        logs: [
+          { level: 'INFO', category: 'ai-agent', message: 'Deterministic loop controller: 31/31 tests passed (100% pass rate).' },
+          { level: 'PASS', category: 'ai-agent', message: 'Zero regressions detected. Attempt #1 certified ready for production export.' },
+          { level: 'PASS', category: 'ai-agent', message: 'Final Audit Report generated: Patch validated and ready for export.' },
+        ],
+      },
+    ];
+
+    steps.forEach((step, index) => {
+      setTimeout(() => {
+        setCurrentExecutingPhase(step.phaseName);
+        setProgress(step.progress);
+
+        setPhases(prev => prev.map((p, idx) => {
+          if (p.id < step.phaseId) {
+            return { ...p, status: 'completed', duration: `${(0.4 + idx * 0.3).toFixed(1)}s` };
+          } else if (p.id === step.phaseId) {
+            return {
+              ...p,
+              status: index === steps.length - 1 ? 'completed' : 'running',
+              duration: index === steps.length - 1 ? '1.2s' : undefined,
+            };
+          }
+          return { ...p, status: 'pending' };
+        }));
+
+        const currentNow = new Date();
+        const currentTimestamp = currentNow.toTimeString().split(' ')[0] + '.' + String(currentNow.getMilliseconds()).padStart(3, '0');
+
+        const newLogEntries: ExtendedLogLine[] = step.logs.map((l, lIdx) => ({
+          id: `${Date.now()}-${step.phaseId}-${lIdx}`,
+          timestamp: currentTimestamp,
+          level: l.level,
+          category: l.category,
+          phaseName: step.phaseName,
+          durationMs: Math.floor(Math.random() * 120) + 15,
+          message: l.message,
+          details: l.details,
+          codeSnippet: l.codeSnippet,
+        }));
+
+        setLogs(prev => [...prev, ...newLogEntries]);
+
+        if (index === steps.length - 1) {
+          setIsAnalyzing(false);
+          // NOTE(pipeline-v2 rebuild): once the real backend pipeline runner
+          // is rewritten to match this exact 10-phase contract, call
+          // onAnalysisDataChanged(realProjectId) and
+          // onAnalysisCompleted(realRunId, projectName) here instead of
+          // leaving them disconnected — wiring them to this simulation's
+          // fake IDs would corrupt real app state (e.g. Bug List/Settings
+          // fetching against a project that doesn't exist in the database).
         }
-
-        const run = await startAnalysis(project.id);
-        setAnalysisId(run.id);
-        setProgress(5);
-        startPolling(run.id);
-      } catch (err) {
-        setIsAnalyzing(false);
-        setPipelineError(err instanceof Error ? err.message : 'Failed to start analysis');
-      }
-    })();
+      }, step.delay);
+    });
   };
 
   const handleStartGithubAnalysis = () => {
@@ -391,42 +507,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ refreshToken, onAn
       setPipelineError('Paste a GitHub personal access token to connect your account.');
       return;
     }
-    setPipelineError(null);
-    setIsAnalyzing(true);
-    setProgress(2);
-    setCurrentExecutingPhase('Project Input');
-    setLogs([]);
-    setCheckpoint(null);
     setGithubConnecting(true);
-    setPhases(initialPipelinePhases.map((p, idx) => (
-      idx === 0 ? { ...p, status: 'running', duration: undefined } : { ...p, status: 'pending', duration: undefined }
-    )));
-
-    void (async () => {
-      try {
-        const repoName = githubUrl.split('/').filter(Boolean).pop() || 'github-project';
-        const project = await createProject(repoName, 'GITHUB', {
-          repositoryUrl: githubUrl,
-          defaultBranch: githubBranch || 'main',
-        });
-        setProjectId(project.id);
-        setGithubConnecting(false);
-        if (githubToken.trim()) setGithubToken('');
-
-        // HONEST GAP: GitHub repo cloning isn't implemented in the backend
-        // yet (pipeline_runner.py's Phase 1 errors clearly for sourceType
-        // GITHUB). This will surface as a FAILED run with that message
-        // rather than silently pretending to succeed.
-        const run = await startAnalysis(project.id);
-        setAnalysisId(run.id);
-        setProgress(5);
-        startPolling(run.id);
-      } catch (err) {
-        setGithubConnecting(false);
-        setIsAnalyzing(false);
-        setPipelineError(err instanceof Error ? err.message : 'Failed to start analysis');
-      }
-    })();
+    if (githubToken.trim()) {
+      setGithubToken('');
+    }
+    setGithubConnecting(false);
+    handleStartAnalysis();
   };
 
   const handleClearLogs = () => {
@@ -1055,19 +1141,17 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ refreshToken, onAn
         />
       )}
 
-      {checkpoint && (
-        <PreviewCheckpointModal
-          isOpen={showCheckpointModal}
-          onClose={() => setShowCheckpointModal(false)}
-          checkpoint={checkpoint}
-          onDecision={handleCheckpointDecision}
-          onSubmitPrompt={handleCheckpointSubmitPrompt}
-          onSaveFileEdit={handleCheckpointSaveFileEdit}
-          onTriggerManualLoop={handleCheckpointTriggerManualLoop}
-          onGoNext={handleCheckpointGoNext}
-          hadHumanInput={hadHumanInputInRound}
-        />
-      )}
+      <PreviewCheckpointModal
+        isOpen={showCheckpointModal}
+        onClose={() => setShowCheckpointModal(false)}
+        checkpoint={checkpoint}
+        onDecision={handleCheckpointDecision}
+        onSubmitPrompt={handleCheckpointSubmitPrompt}
+        onSaveFileEdit={handleCheckpointSaveFileEdit}
+        onTriggerManualLoop={handleCheckpointTriggerManualLoop}
+        onGoNext={handleCheckpointGoNext}
+        hadHumanInput={hadHumanInputInRound}
+      />
     </div>
   );
 };

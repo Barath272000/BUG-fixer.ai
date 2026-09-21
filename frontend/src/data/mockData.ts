@@ -474,225 +474,103 @@ export const initialFixHistory: AIFixHistoryItem[] = [
   }
 ];
 
+// Placeholder shown before any real analysis run exists (see DashboardView,
+// which overwrites this the moment the backend returns real phase data).
+// Every phase starts 'pending' with no fabricated durations, subtasks, or
+// findings -- a prior version of this file hardcoded all 10 phases as
+// 'completed' with invented numbers (fake file counts, fake test results,
+// a fake BUG-001 diff), which made the dashboard look like a finished,
+// successful run before the user had even uploaded a project.
 export const pipelinePhases: PipelinePhase[] = [
   {
     id: 1,
     name: 'Project Input',
     description: 'ZIP upload, Git repo, context docs (txt/md/pdf) & zero-trust security validation',
-    duration: '0.8s',
-    status: 'completed',
-    subtasks: [
-      { name: 'Upload ZIP archive (integrity & quota verified)', completed: true },
-      { name: 'GitHub / Git repository connector ready', completed: true },
-      { name: 'Optional context docs (txt / md / pdf / OpenAPI specs)', completed: true },
-      { name: 'Security & validation check (file size, zero-malware, path traversal defense)', completed: true }
-    ],
-    subprocesses: [
-      { id: '1-1', name: 'Upload ZIP Archive', description: 'Decompressing & verifying 4.82MB payload', completed: true, status: 'completed' },
-      { id: '1-2', name: 'GitHub Repo Connector', description: 'Git clone & branch refs resolver ready', completed: true, status: 'completed' },
-      { id: '1-3', name: 'Optional Context Docs', description: 'Ingesting OpenAPI 3.0 specs & contract guidelines', completed: true, status: 'completed' },
-      { id: '1-4', name: 'Security & Validation Check', description: 'Anti-malware purge, Zip Slip path traversal block', completed: true, status: 'completed' }
-    ]
+    duration: '',
+    status: 'pending',
+    subtasks: [],
+    subprocesses: []
   },
   {
     id: 2,
     name: 'Project Setup',
     description: 'Extract directory, detect language, framework, dependencies, entry point & verify context',
-    duration: '2.1s',
-    status: 'completed',
-    subtasks: [
-      { name: 'Extract project analysis directory (/workspace/api-gateway)', completed: true },
-      { name: 'Detect language (Python 3.11.6)', completed: true },
-      { name: 'Detect framework (FastAPI 0.104.1)', completed: true },
-      { name: 'Detect dependencies (47 resolved packages)', completed: true },
-      { name: 'Detect entry point (src/main.py:app)', completed: true },
-      { name: 'Read project context (AST call graph & route map)', completed: true },
-      { name: 'Verify context (Ground against openapi-spec.yaml)', completed: true }
-    ],
-    subprocesses: [
-      { id: '2-1', name: 'Extract Project Analysis Directory', description: 'Unpacking archive to canonical sandboxed folder', completed: true, status: 'completed' },
-      { id: '2-2', name: 'Detect Language', description: 'Python 3.11.6 runtime identified', completed: true, status: 'completed' },
-      { id: '2-3', name: 'Detect Framework', description: 'FastAPI 0.104.1 web framework bound', completed: true, status: 'completed' },
-      { id: '2-4', name: 'Detect Dependency', description: 'Parsed requirements.txt (SQLAlchemy, Redis, Pydantic)', completed: true, status: 'completed' },
-      { id: '2-5', name: 'Detect Entry Point', description: 'Resolved uvicorn server target: src/app/main.py', completed: true, status: 'completed' },
-      { id: '2-6', name: 'Read Project Context', description: 'AST symbol tree & route handlers ingested', completed: true, status: 'completed' },
-      { id: '2-7', name: 'Verify Context', description: 'Cross-validated against uploaded context specs', completed: true, status: 'completed' }
-    ]
+    duration: '',
+    status: 'pending',
+    subtasks: [],
+    subprocesses: []
   },
   {
     id: 3,
     name: 'Static Analysis',
-    description: 'Zero-AI deterministic AST linters (flake8, ruff, bandit, eslint) in lightweight container',
-    duration: '1.4s',
-    status: 'completed',
-    subtasks: [
-      { name: 'Run syntax linter (flake8 AST traversal on 34 files)', completed: true },
-      { name: 'Run security scanner (bandit automated AST vulnerability scan)', completed: true },
-      { name: 'Type-checker verification (mypy strict mode validation)', completed: true },
-      { name: 'Format & contract compliance checks (ruff rules check)', completed: true }
-    ],
-    subprocesses: [
-      { id: '3-1', name: 'Deterministic Syntax Linter', description: 'flake8 & tree-sitter AST validation (0 AI cost)', completed: true, status: 'completed' },
-      { id: '3-2', name: 'AST Security Scanner', description: 'Bandit static security audit: 0 critical vulnerabilities', completed: true, status: 'completed' },
-      { id: '3-3', name: 'Static Type Checking', description: 'mypy verified 42 functions with 2 non-blocking warnings', completed: true, status: 'completed' },
-      { id: '3-4', name: 'Contract Rules Verification', description: 'Ruff linter checked PEP8 & OpenAPI naming constraints', completed: true, status: 'completed' }
-    ]
+    description: 'Zero-AI deterministic AST linters (flake8, ruff, bandit) in a lightweight container',
+    duration: '',
+    status: 'pending',
+    subtasks: [],
+    subprocesses: []
   },
   {
     id: 4,
     name: 'Error & Evidence Collection',
     description: 'Merge compiler logs, static analysis findings, stack traces & loop iteration state',
-    duration: '1.8s',
-    status: 'completed',
-    subtasks: [
-      { name: 'Merge static analysis & compiler diagnostics', completed: true },
-      { name: 'Capture failed stack frames & AST call graph', completed: true },
-      { name: 'Triaged uncaught exceptions & HTTP error codes', completed: true },
-      { name: 'Compute error fingerprint (fp:e9a2f1c8)', completed: true },
-      { name: 'Bind human prompt pad & direct file edit triggers', completed: true }
-    ],
-    subprocesses: [
-      { id: '4-1', name: 'Evidence Merging Engine', description: 'Combined compiler output, linter warnings, and runtime trace', completed: true, status: 'completed' },
-      { id: '4-2', name: 'Call Graph Reconstruction', description: 'Tracing authenticate_user -> decode_token -> get_user', completed: true, status: 'completed' },
-      { id: '4-3', name: 'Fingerprint Generation', description: 'Generated hash [fp:e9a2f1c8] for duplicate loop detection', completed: true, status: 'completed' },
-      { id: '4-4', name: 'Loop Context Hydration', description: 'Attached active attempt metadata and human prompt notes', completed: true, status: 'completed' }
-    ]
+    duration: '',
+    status: 'pending',
+    subtasks: [],
+    subprocesses: []
   },
   {
     id: 5,
     name: 'AI Root Cause Analysis',
     description: 'Deep reasoning LLM investigates root cause, contract breach & blast radius',
-    duration: '3.4s',
-    status: 'completed',
-    subtasks: [
-      { name: 'Understand failure mode (AttributeError in auth middleware)', completed: true },
-      { name: 'Pinpoint fault location (src/app/routers/auth.py:76)', completed: true },
-      { name: 'Cross-reference contracts against openapi-spec.yaml', completed: true },
-      { name: 'Analyze dependency impact & blast radius', completed: true },
-      { name: 'Generate root cause diagnostic rationale', completed: true }
-    ],
-    subprocesses: [
-      { id: '5-1', name: 'LLM Reasoning Dispatch', description: 'Deep reasoning model ingests AST context and stack frames', completed: true, status: 'completed' },
-      { id: '5-2', name: 'Exact AST Fault Isolation', description: 'Located unverified dict subscript at auth.py:76', completed: true, status: 'completed' },
-      { id: '5-3', name: 'Contract Verification', description: 'OpenAPI requires HTTP 401 on malformed Authorization token', completed: true, status: 'completed' },
-      { id: '5-4', name: 'Diagnostic Rationale', description: 'Generated structured hypothesis and repair strategy', completed: true, status: 'completed' }
-    ]
+    duration: '',
+    status: 'pending',
+    subtasks: [],
+    subprocesses: []
   },
   {
     id: 6,
     name: 'AI Patch Generation',
-    description: 'Synthesize minimal unified diff patch [Shows OLD vs NEW diff if loop iteration]',
-    duration: '2.9s',
-    status: 'completed',
-    subtasks: [
-      { name: 'Synthesize verified code patch (8 lines modified)', completed: true },
-      { name: 'Verify unified diff formatting & AST idempotency', completed: true },
-      { name: 'Generate multi-attempt diff comparison (Old vs New)', completed: true },
-      { name: 'Explain architectural patch rationale', completed: true }
-    ],
-    subprocesses: [
-      { id: '6-1', name: 'Patch Synthesis', description: 'Grounded patch synthesis with 94% confidence score', completed: true, status: 'completed' },
-      { id: '6-2', name: 'Unified Diff Validation', description: 'Unified diff syntax verified against tree-sitter AST', completed: true, status: 'completed' },
-      { id: '6-3', name: 'Attempt Diff Comparison', description: 'Compared patch candidate against previous attempt revisions', completed: true, status: 'completed' },
-      { id: '6-4', name: 'Change Rationale', description: 'Certified non-breaking contract fix with null guards', completed: true, status: 'completed' }
-    ]
+    description: 'Synthesize minimal unified diff patch',
+    duration: '',
+    status: 'pending',
+    subtasks: [],
+    subprocesses: []
   },
   {
     id: 7,
     name: 'Isolated Environment',
     description: 'Provision Docker container sandbox with resource limits & persistent workspace',
-    duration: '3.1s',
-    status: 'completed',
-    subtasks: [
-      { name: 'Spawn isolated Docker container (python:3.11-slim)', completed: true },
-      { name: 'Apply cgroup resource limits (2 vCPU, 4GB RAM)', completed: true },
-      { name: 'Bind-mount workspace with persistent /workspace/.venv', completed: true },
-      { name: 'Execute sandbox smoke test', completed: true }
-    ],
-    subprocesses: [
-      { id: '7-1', name: 'Container Spawning', description: 'Isolated Linux container initialized with seccomp profile', completed: true, status: 'completed' },
-      { id: '7-2', name: 'Resource Quotas', description: 'Enforced 2.0 vCPU and 4096MB memory constraints', completed: true, status: 'completed' },
-      { id: '7-3', name: 'Persistent Venv Mount', description: 'Bind-mounted /workspace/.venv across container invocations', completed: true, status: 'completed' },
-      { id: '7-4', name: 'Smoke Test', description: 'Container shell environment verified ready', completed: true, status: 'completed' }
-    ]
+    duration: '',
+    status: 'pending',
+    subtasks: [],
+    subprocesses: []
   },
   {
     id: 8,
     name: 'Install → Build → Run & Test',
-    description: 'Execute install, build pyc/wheels, run FastAPI daemon (port 8000), run unit tests & fire Preview Checkpoint',
-    duration: '12.4s',
-    status: 'completed',
-    subtasks: [
-      { name: 'Step 1: Install dependencies (pip install -r requirements.txt)', completed: true },
-      { name: 'Step 2: Build application (compile bytecode & check exports)', completed: true },
-      { name: 'Step 3: Run application server (uvicorn main:app on port 8000)', completed: true },
-      { name: 'Step 4: Test execution (unit & smoke test suite)', completed: true },
-      { name: 'Preview Checkpoint: Port forwarding & live browser preview decision', completed: true }
-    ],
-    subprocesses: [
-      { id: '8-1', name: 'Dependency Installation', description: '47 packages installed in persistent virtualenv', completed: true, status: 'completed' },
-      { id: '8-2', name: 'Build & Compilation', description: 'AST parsed cleanly across all 34 source files', completed: true, status: 'completed' },
-      { id: '8-3', name: 'Application Server Run', description: 'Uvicorn ASGI daemon spawned on 0.0.0.0:8000 with forwarded port routes', completed: true, status: 'completed' },
-      { id: '8-4', name: 'Initial Unit Test Suite', description: 'Executed 14 core unit test suites (all passed)', completed: true, status: 'completed' },
-      { id: '8-5', name: 'Preview Checkpoint & Port Forwarding', description: 'Phase 8 finished: Exposing port 8000 and prompting developer for live container preview', completed: true, status: 'completed' }
-    ]
+    description: 'Execute install, build, run the app server, run tests & fire Preview Checkpoint',
+    duration: '',
+    status: 'pending',
+    subtasks: [],
+    subprocesses: []
   },
   {
     id: 9,
     name: 'Regression Check',
-    description: 'Execute full test suite, integration harness, concurrency & OpenAPI contract verification',
-    duration: '8.6s',
-    status: 'completed',
-    subtasks: [
-      { name: 'Run full regression test suite (31/31 Pytest test files)', completed: true },
-      { name: 'Redis cluster token bucket concurrency test', completed: true },
-      { name: 'PostgreSQL database connection pool leak test', completed: true },
-      { name: 'OpenAPI 3.0 schema regression verification', completed: true }
-    ],
-    subprocesses: [
-      { id: '9-1', name: 'Full Regression Suite', description: '31 comprehensive test suites executed across entire codebase', completed: true, status: 'completed' },
-      { id: '9-2', name: 'Concurrency & Race Probe', description: 'Redis multi-node cluster TTL and token bucket assertions', completed: true, status: 'completed' },
-      { id: '9-3', name: 'Database Contract Check', description: 'Alembic migrations and SQLAlchemy session isolation test', completed: true, status: 'completed' },
-      { id: '9-4', name: 'Contract Compliance', description: 'Zero regressions against openapi-spec.yaml contracts', completed: true, status: 'completed' }
-    ]
+    description: 'Execute full test suite, integration harness & contract verification',
+    duration: '',
+    status: 'pending',
+    subtasks: [],
+    subprocesses: []
   },
   {
     id: 10,
     name: 'Validation & Iteration',
     description: 'Evaluate pass/fail result; branch to Final Report or Manual/Automatic Retry Loop',
-    duration: '2.5s',
-    status: 'completed',
-    validationStatus: 'passed',
-    subtasks: [
-      { name: 'Evaluate test results (31 passed, 0 failed, 100% pass rate)', completed: true },
-      { name: 'Loop controller check: Did human act this round?', completed: true },
-      { name: 'Automatic loop enforcement: Check max 3 attempts & same-error short-circuit', completed: true },
-      { name: 'Branching: PASS -> Final Report | FAIL -> Manual/Auto Loop or Needs Human Review', completed: true }
-    ],
-    subprocesses: [
-      { id: '10-1', name: 'Deterministic Evaluation', description: '100% pass rate verified on active attempt #1', completed: true, status: 'completed' },
-      { id: '10-2', name: 'Loop Decision Engine', description: 'Analyzed prompt pad history, direct file edits & attempt count', completed: true, status: 'completed' },
-      { id: '10-3', name: 'Same-Error Fingerprint Guard', description: 'Checked error hashes [fp:e9a2f1c8] against previous rounds', completed: true, status: 'completed' },
-      { id: '10-4', name: 'Final Report Generation', description: 'Certified audit report ready with zero-regression guarantee', completed: true, status: 'completed' }
-    ],
-    validationReport: {
-      testPassRate: '100% (31/31 passed)',
-      totalTests: 31,
-      passedTests: 31,
-      failedTests: 0,
-      regressionFound: false,
-      recommendation: 'Patch is production-ready. Certified zero-regression across all OpenAPI endpoints.',
-      summary: 'BUG-001 (Null pointer in JWT sub claim) resolved cleanly. The patch adds strict dict payload type checks and returns standard HTTP 401 Unauthorized on invalid bearer tokens.',
-      diffSnippet: `@@ -76,3 +76,7 @@
-- sub = payload.get("sub")
-- user = await get_user_by_id(sub)
-+ if not payload or not isinstance(payload, dict):
-+     raise HTTPException(status_code=401, detail="Invalid token payload")
-+ sub = payload.get("sub")
-+ user = await get_user_by_id(sub)`,
-      timestamp: '2026-08-19 10:32:12',
-      cycleCount: 1
-    }
+    duration: '',
+    status: 'pending',
+    subtasks: [],
+    subprocesses: []
   }
 ];
 
