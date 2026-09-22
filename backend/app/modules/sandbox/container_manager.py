@@ -71,12 +71,25 @@ async def start_preview_container(workspace: str, command: str, language: str, c
     return {"ok": True, "hostPort": host_port, "containerName": name}
 
 
-async def execute_in_docker(workspace: str, command: str, language: str | None = None) -> CommandResult:
-    """Executes a one-shot sandbox command inside a disposable Docker container."""
+async def execute_in_docker(
+    workspace: str,
+    command: str,
+    language: str | None = None,
+    network: str | None = None,
+    extra_env: dict[str, str] | None = None,
+) -> CommandResult:
+    """Executes a one-shot sandbox command inside a disposable Docker container.
+
+    network/extra_env let a caller (Phase 8, via a provisioned database
+    sidecar -- see sandbox/db_sidecar.py) attach this one-shot container to
+    the sidecar's dedicated network and pass it a DATABASE_URL, instead of
+    always using the global --network none default. Passing neither keeps
+    prior behavior exactly as it was.
+    """
     image = image_for_language(language or "python")
     args = [
         "docker", "run", "--rm",
-        "--network", sandbox_limits.network,
+        "--network", network or sandbox_limits.network,
         "--cpus", str(sandbox_limits.cpu),
         "--memory", sandbox_limits.memory,
         "--pids-limit", str(sandbox_limits.pids),
@@ -85,6 +98,10 @@ async def execute_in_docker(workspace: str, command: str, language: str | None =
         "--user", "10001:10001",
         "-e", "PYTHONDONTWRITEBYTECODE=1",
         "-e", "PYTHONPYCACHEPREFIX=/tmp/pycache",
+    ]
+    for key, value in (extra_env or {}).items():
+        args += ["-e", f"{key}={value}"]
+    args += [
         "-v", f"{workspace}:/workspace:rw",
         "-w", "/workspace",
         image,

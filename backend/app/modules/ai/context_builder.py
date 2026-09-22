@@ -164,6 +164,11 @@ async def build_ai_context(
             "name": project.name,
             "language": project.language,
             "framework": project.framework,
+            "database": (
+                {"type": project.databaseType, "sidecarSupported": project.databaseType in ("postgres", "mysql")}
+                if project.databaseType
+                else None
+            ),
         },
         "bug": (
             {

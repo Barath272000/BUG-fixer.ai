@@ -54,6 +54,7 @@ from app.modules.analysis.detectors import detect_build_command, detect_preview,
 from app.modules.analysis.phase_manager import PIPELINE_DEFINITIONS
 from app.modules.analysis.pipeline_service import add_log, set_security_report, set_subprocesses, set_validation_report
 from app.modules.code_analysis.project_inspector import inspect_project
+from app.modules.sandbox.db_sidecar import start_database_sidecar, stop_database_sidecar
 from app.modules.static_analysis.service import run_static_analysis
 from app.modules.bugs.service import create_bug_from_error
 from app.modules.errors.error_collector import fingerprint, record_error
@@ -478,6 +479,16 @@ async def run_analysis_pipeline(
     run_diagnoses: dict[str, dict] = {}
     # Phase 9 -> Phase 10 handoff, same pattern as run_diagnoses above.
     run_regression_results: dict[str, dict] = {}
+    # Phase 7 -> Phase 8 handoff: the sidecar (if any) is provisioned in
+    # Phase 7 and consumed by Phase 8's install/build/run/test commands.
+    # On a resumed run (start_from_phase=9) this stays None in THIS call's
+    # scope, but the container/network themselves are still running (they
+    # were started by the original call and are only torn down at the
+    # run's true terminal state below) -- Phase 9/10 don't currently need
+    # to reach them since Phase 9's validation uses a separate, non-Docker
+    # execution path (fixes/validation_service.py) that isn't wired to the
+    # sidecar yet -- see NOTE at _run_regression_validation.
+    db_sidecar: dict | None = None
 
     try:
         os.makedirs(work_root, exist_ok=True)
@@ -559,6 +570,7 @@ async def run_analysis_pipeline(
                     ("detect_language", "Detect project language", "inspection"),
                     ("detect_framework", "Detect project framework", "inspection"),
                     ("detect_dependencies", "Analyze project dependencies", "inspection"),
+                    ("detect_database", "Detect expected database", "inspection"),
                     ("index_symbols", "Build source symbol index", "inspection"),
                 ])
                 await set_subprocesses(db, gateway, analysis_id, project_id, phase, subprocesses)
@@ -578,17 +590,26 @@ async def run_analysis_pipeline(
                      "development": str(len(inspection["dependencies"].get("development", {})))},
                 )
                 await _update_phase_step(
+                    db, gateway, analysis_id, project_id, phase, subprocesses, "detect_database", "completed",
+                    {"database": inspection["database"] or "none detected"},
+                )
+                await _update_phase_step(
                     db, gateway, analysis_id, project_id, phase, subprocesses, "index_symbols", "completed",
                     {"symbols": str(inspection["symbolCount"])},
                 )
                 project.language = inspection["language"]
                 project.framework = inspection["framework"]
-                preview_command, preview_port = await detect_preview(work_root, inspection["language"])
+                project.entryPoint = inspection["entryPoint"]
+                project.databaseType = inspection["database"]
+                preview_command, preview_port = await detect_preview(work_root, inspection["language"], inspection["entryPoint"])
                 project.previewCommand = preview_command
                 project.previewPort = preview_port
                 await db.commit()
                 await add_log(db, gateway, analysis_id, project_id, "PASS", "Project Setup",
                               f"Detected {inspection['language']} with {inspection['framework']}", phase.id, phase.number)
+                if inspection["database"]:
+                    await add_log(db, gateway, analysis_id, project_id, "INFO", "Project Setup",
+                                  f"Expects a {inspection['database']} database", phase.id, phase.number)
                 if preview_command:
                     await add_log(db, gateway, analysis_id, project_id, "INFO", "Project Setup",
                                   f"Preview available: {preview_command} on port {preview_port}", phase.id, phase.number)
@@ -701,6 +722,26 @@ async def run_analysis_pipeline(
                 await add_log(db, gateway, analysis_id, project_id, "PASS", "Isolated Environment",
                               "Sandbox initialized and smoke-tested", phase.id, phase.number)
 
+                # Database sidecar: only postgres/mysql have a provisioner
+                # (db_sidecar.py). mongodb/sqlite/redis are detected but not
+                # provisioned yet -- log that gap rather than silently
+                # proceeding as if a database were reachable.
+                if project.databaseType in ("postgres", "mysql"):
+                    db_sidecar = await start_database_sidecar(project.databaseType, analysis_id)
+                    if db_sidecar:
+                        await add_log(db, gateway, analysis_id, project_id, "PASS", "Isolated Environment",
+                                      f"{project.databaseType} sidecar ready for Phase 8", phase.id, phase.number)
+                    else:
+                        await add_log(db, gateway, analysis_id, project_id, "WARN", "Isolated Environment",
+                                      f"Detected a {project.databaseType} dependency but the sidecar container "
+                                      "failed to start or become ready — Phase 8 will run without a database, "
+                                      "so a connection-refused failure there may be an environment gap, not a "
+                                      "real bug.", phase.id, phase.number)
+                elif project.databaseType:
+                    await add_log(db, gateway, analysis_id, project_id, "WARN", "Isolated Environment",
+                                  f"Detected a {project.databaseType} dependency, but there's no sidecar "
+                                  "provisioner for it yet — Phase 8 will run without a database.", phase.id, phase.number)
+
             # Phase 8: Install -> Build -> Run & Test — REUSED from old
             # Phase 4 (build) + Phase 5 (test), merged into one phase.
             # Preview Checkpoint pause/resume NOT wired yet (Job 5) — runs
@@ -722,7 +763,11 @@ async def run_analysis_pipeline(
                 build_command = await detect_build_command(work_root, language)
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "detect_build_command", "completed", {"command": build_command})
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "execute_build", "running")
-                build_result = await run_sandbox(work_root, build_command, language)
+                build_result = await run_sandbox(
+                    work_root, build_command, language,
+                    network=db_sidecar["network"] if db_sidecar else None,
+                    extra_env=db_sidecar["env"] if db_sidecar else None,
+                )
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "execute_build", "completed" if build_result.code == 0 else "failed", {"durationMs": str(build_result.duration_ms)})
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "capture_build_output", "completed", {"exitCode": str(build_result.code), "stdoutBytes": str(len(build_result.stdout)), "stderrBytes": str(len(build_result.stderr))})
 
@@ -744,7 +789,11 @@ async def run_analysis_pipeline(
                 test_command = await detect_test_command(work_root, language)
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "detect_test_command", "completed", {"command": test_command})
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "execute_tests", "running")
-                test_result = await run_sandbox(work_root, test_command, language)
+                test_result = await run_sandbox(
+                    work_root, test_command, language,
+                    network=db_sidecar["network"] if db_sidecar else None,
+                    extra_env=db_sidecar["env"] if db_sidecar else None,
+                )
                 summary = parse_generic_test_output(test_result.stdout, test_result.stderr, test_result.code)
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "execute_tests", "completed" if test_result.code == 0 or summary.status == "NO_TESTS" else "failed", {"durationMs": str(test_result.duration_ms)})
 
@@ -956,6 +1005,12 @@ async def run_analysis_pipeline(
         project.status = ProjectStatus.READY
         await db.commit()
 
+        # Run has truly finished (this point is only reached on a resumed
+        # call -- Phase 8 always `return`s early above on a fresh run) --
+        # tear down the database sidecar started back in Phase 7, if any.
+        if project.databaseType in ("postgres", "mysql"):
+            await stop_database_sidecar(analysis_id)
+
         await gateway.publish(
             project_id,
             {"type": "analysis.completed" if run.status == AnalysisStatus.COMPLETED else "analysis.needs_review",
@@ -971,6 +1026,13 @@ async def run_analysis_pipeline(
         run.errorMessage = message
         project.status = ProjectStatus.FAILED
         await db.commit()
+
+        if project.databaseType in ("postgres", "mysql"):
+            try:
+                await stop_database_sidecar(analysis_id)
+            except Exception:  # noqa: BLE001
+                # Never let sidecar cleanup mask the real pipeline error.
+                pass
 
         try:
             await add_log(db, gateway, analysis_id, project_id, "ERROR", "Pipeline",
@@ -1043,6 +1105,10 @@ async def reject_checkpoint(
     run.completedAt = datetime.now(timezone.utc)
     run.errorMessage = "Cancelled at Preview Checkpoint"
     await db.commit()
+
+    project = await db.get(Project, project_id)
+    if project and project.databaseType in ("postgres", "mysql"):
+        await stop_database_sidecar(analysis_id)
 
     await gateway.publish(
         project_id,

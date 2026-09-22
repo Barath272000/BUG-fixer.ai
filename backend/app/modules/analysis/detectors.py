@@ -58,13 +58,17 @@ async def detect_test_command(root: str, language: str) -> str:
     return 'echo "No supported test command detected"'
 
 
-async def detect_preview(root: str, language: str) -> tuple[str | None, int | None]:
+async def detect_preview(root: str, language: str, entry_point: str | None = None) -> tuple[str | None, int | None]:
     """Best-effort detection of a runnable web-server command + port for the
     Preview feature. Returns (command, port) or (None, None) when nothing
     that looks like a web server was found. This is a guess, not a
     guarantee — e.g. a Flask app that calls app.run() without host="0.0.0.0"
     will bind to localhost-only inside the container and won't be reachable
     through the published port even though the command itself "succeeds".
+
+    entry_point, when given, is Phase 2's single detect_entry_point() result
+    (see project_inspector.py) — the Python branch below prefers it over
+    re-probing the filesystem for manage.py/app.py/main.py itself.
     """
     root_pkg_path = os.path.join(root, "package.json")
     nested_pkg_path = os.path.join(root, "frontend", "package.json")
@@ -99,13 +103,19 @@ async def detect_preview(root: str, language: str) -> tuple[str | None, int | No
                 reqs = f.read().lower()
         except FileNotFoundError:
             reqs = ""
-        if os.path.exists(os.path.join(root, "manage.py")):
+        # Prefer Phase 2's already-detected entry point over re-probing for
+        # manage.py/app.py/main.py ourselves (was duplicated file-sniffing;
+        # entry_point is the single source of truth now).
+        if entry_point == "manage.py" or (entry_point is None and os.path.exists(os.path.join(root, "manage.py"))):
             return "python manage.py runserver 0.0.0.0:8000", 8000
         if "fastapi" in reqs or "uvicorn" in reqs:
-            entry = "main:app" if os.path.exists(os.path.join(root, "main.py")) else "app:app"
+            module = (entry_point or "main.py").removesuffix(".py")
+            entry = f"{module}:app" if os.path.exists(os.path.join(root, f"{module}.py")) else "app:app"
             return f"pip install -q uvicorn 2>/dev/null; uvicorn {entry} --host 0.0.0.0 --port 8000", 8000
         if "flask" in reqs:
-            entry = "app.py" if os.path.exists(os.path.join(root, "app.py")) else "main.py"
+            entry = entry_point if entry_point and os.path.exists(os.path.join(root, entry_point)) else (
+                "app.py" if os.path.exists(os.path.join(root, "app.py")) else "main.py"
+            )
             if os.path.exists(os.path.join(root, entry)):
                 return f"python {entry}", 5000
         return None, None

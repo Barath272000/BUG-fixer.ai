@@ -26,6 +26,8 @@ class Project(Base):
     framework: Mapped[str | None] = mapped_column(String, nullable=True)
     previewCommand: Mapped[str | None] = mapped_column(String, nullable=True)
     previewPort: Mapped[int | None] = mapped_column(nullable=True)
+    entryPoint: Mapped[str | None] = mapped_column(String, nullable=True)
+    databaseType: Mapped[str | None] = mapped_column(String, nullable=True)
     createdAt: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updatedAt: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

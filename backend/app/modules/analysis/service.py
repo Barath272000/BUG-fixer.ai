@@ -13,6 +13,7 @@ from app.models.bug import Bug
 from app.models.enums import AnalysisStatus, BugStatus, CheckpointStatus, ProjectStatus
 from app.models.project import Project
 from app.modules.analysis.phase_manager import PIPELINE_DEFINITIONS
+from app.modules.sandbox.db_sidecar import stop_database_sidecar
 
 
 async def _assert_project_access(db: AsyncSession, owner_id: str, project_id: str) -> Project:
@@ -124,6 +125,11 @@ async def cancel_analysis(db: AsyncSession, owner_id: str, analysis_id: str) -> 
     run.errorMessage = "Cancelled by user"
     await db.commit()
     await db.refresh(run)
+
+    project = await db.get(Project, run.projectId)
+    if project and project.databaseType in ("postgres", "mysql"):
+        await stop_database_sidecar(analysis_id)
+
     return run
 
 

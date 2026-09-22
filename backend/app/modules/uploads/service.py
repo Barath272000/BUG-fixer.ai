@@ -48,7 +48,13 @@ async def store_project_archive(
     await db.execute(
         update(Project)
         .where(Project.id == project_id)
-        .values(sourcePath=target, language=inspection["language"], framework=inspection["framework"])
+        .values(
+            sourcePath=target,
+            language=inspection["language"],
+            framework=inspection["framework"],
+            entryPoint=inspection["entryPoint"],
+            databaseType=inspection["database"],
+        )
     )
     await db.commit()
 
@@ -57,5 +63,6 @@ async def store_project_archive(
         "sha256": sha256.hexdigest(),
         "language": inspection["language"],
         "framework": inspection["framework"],
-        "entryPoints": inspection["entryPoints"],
+        "entryPoint": inspection["entryPoint"],
+        "database": inspection["database"],
     }
