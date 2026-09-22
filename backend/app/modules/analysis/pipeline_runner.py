@@ -52,7 +52,7 @@ from app.modules.fixes.validation_service import validate_workspace
 from app.models.project import Project
 from app.modules.analysis.detectors import detect_build_command, detect_preview, detect_test_command
 from app.modules.analysis.phase_manager import PIPELINE_DEFINITIONS
-from app.modules.analysis.pipeline_service import add_log, set_security_report, set_subprocesses
+from app.modules.analysis.pipeline_service import add_log, set_security_report, set_subprocesses, set_validation_report
 from app.modules.code_analysis.project_inspector import inspect_project
 from app.modules.static_analysis.service import run_static_analysis
 from app.modules.bugs.service import create_bug_from_error
@@ -871,6 +871,33 @@ async def run_analysis_pipeline(
 
                 needs_human = bool(same_error or exhausted)
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "finalize", "completed", {"needsHumanReview": str(needs_human)})
+
+                total_bugs = len(run_regression_results)
+                final_passed = (total_bugs - len(failing_bug_ids)) + len(fixed_on_retry)
+                final_failed = len(same_error) + len(exhausted)
+                pass_rate_pct = round((final_passed / total_bugs) * 100) if total_bugs else 100
+                if needs_human:
+                    summary = (
+                        f"{final_failed} of {total_bugs} bug(s) still failing after the retry loop "
+                        f"({len(same_error)} hit the same error twice and were short-circuited, "
+                        f"{len(exhausted)} exhausted all {run.maxAttempts} attempt(s))."
+                    )
+                    recommendation = "Needs human review before this run can be considered production-ready."
+                else:
+                    retry_note = f" ({len(fixed_on_retry)} of those fixed via the retry loop)" if fixed_on_retry else ""
+                    summary = f"All {total_bugs} bug(s) validated for this run passed{retry_note}."
+                    recommendation = "Patch set is production-ready — zero unresolved bugs after validation."
+                await set_validation_report(db, gateway, analysis_id, project_id, phase, {
+                    "totalTests": total_bugs,
+                    "passedTests": final_passed,
+                    "failedTests": final_failed,
+                    "testPassRate": f"{final_passed}/{total_bugs} ({pass_rate_pct}%)",
+                    "regressionFound": needs_human,
+                    "summary": summary,
+                    "recommendation": recommendation,
+                    "cycleCount": 2 if (fixed_on_retry or same_error or exhausted) else 1,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
 
                 if needs_human:
                     run.status = AnalysisStatus.NEEDS_HUMAN_REVIEW

@@ -39,7 +39,6 @@ interface PhaseInspectorModalProps {
   contextDocs: ContextDoc[];
   analysisId?: string | null;
   onRerunSecurityChecks?: () => void;
-  onRerunValidation?: (simulateFail?: boolean) => void;
   /** Opens the live app preview (Phase 5: Run & Test) in a new browser tab. */
   onOpenPreview?: () => void;
   previewLoading?: boolean;
@@ -54,7 +53,6 @@ export const PhaseInspectorModal: React.FC<PhaseInspectorModalProps> = ({
   contextDocs,
   analysisId,
   onRerunSecurityChecks,
-  onRerunValidation,
   onOpenPreview,
   previewLoading,
   previewError
@@ -62,8 +60,6 @@ export const PhaseInspectorModal: React.FC<PhaseInspectorModalProps> = ({
   const [activeTab, setActiveTab] = useState<'details' | 'subprocesses' | 'raw-logs' | 'validation-report'>('details');
   const [copied, setCopied] = useState(false);
   const [isRevalidating, setIsRevalidating] = useState(false);
-  const [simulatedValidationState, setSimulatedValidationState] = useState<'idle' | 'running' | 'passed' | 'failed' | 're_analyzing'>('passed');
-  const [validationCycle, setValidationCycle] = useState(1);
 
   // Real Terminal / Raw Logs state — fetched from the backend instead of the
   // old hardcoded fake log strings.
@@ -128,26 +124,6 @@ export const PhaseInspectorModal: React.FC<PhaseInspectorModalProps> = ({
     }, 800);
   };
 
-  const handleTriggerValidation = (simulateFail: boolean = false) => {
-    setSimulatedValidationState('running');
-    setTimeout(() => {
-      if (simulateFail) {
-        setSimulatedValidationState('failed');
-        setTimeout(() => {
-          setSimulatedValidationState('re_analyzing');
-          setTimeout(() => {
-            setValidationCycle(prev => prev + 1);
-            setSimulatedValidationState('passed');
-            if (onRerunValidation) onRerunValidation(false);
-          }, 1500);
-        }, 1200);
-      } else {
-        setSimulatedValidationState('passed');
-        if (onRerunValidation) onRerunValidation(false);
-      }
-    }, 900);
-  };
-
   // Dedicated phase icons
   const getPhaseIcon = (id: number) => {
     switch (id) {
@@ -159,6 +135,8 @@ export const PhaseInspectorModal: React.FC<PhaseInspectorModalProps> = ({
       case 6: return <Bug className="w-4 h-4 text-rose-400" />;
       case 7: return <BrainCircuit className="w-4 h-4 text-indigo-400" />;
       case 8: return <Sparkles className="w-4 h-4 text-emerald-400" />;
+      case 9: return <FileCheck className="w-4 h-4 text-teal-400" />;
+      case 10: return <Sparkles className="w-4 h-4 text-amber-400" />;
       default: return <Activity className="w-4 h-4 text-indigo-400" />;
     }
   };
@@ -217,7 +195,7 @@ export const PhaseInspectorModal: React.FC<PhaseInspectorModalProps> = ({
             <div>
               <div className="flex items-center gap-2">
                 <span className="text-[10px] font-mono bg-[#0D1117] border border-[#30363D] px-1.5 py-0.5 rounded text-gray-400">
-                  PHASE 0{phase.id} OF 08
+                  PHASE {String(phase.id).padStart(2, '0')} OF 10
                 </span>
                 <h3 className="text-sm font-bold text-white tracking-tight font-mono">
                   {phase.name}
@@ -249,19 +227,6 @@ export const PhaseInspectorModal: React.FC<PhaseInspectorModalProps> = ({
               >
                 <RotateCw className={`w-3.5 h-3.5 ${isRevalidating ? 'animate-spin text-indigo-400' : ''}`} />
                 <span>{isRevalidating ? 'Re-scanning...' : 'Re-verify Security'}</span>
-              </button>
-            )}
-
-            {phase.id === 10 && (
-              <button
-                type="button"
-                onClick={() => handleTriggerValidation(false)}
-                disabled={simulatedValidationState === 'running'}
-                className="px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-500 text-xs font-mono text-white flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
-                title="Re-run test validation suite on patched code"
-              >
-                <RefreshCcw className={`w-3.5 h-3.5 ${simulatedValidationState === 'running' ? 'animate-spin' : ''}`} />
-                <span>Re-run Validation</span>
               </button>
             )}
 
@@ -427,87 +392,40 @@ export const PhaseInspectorModal: React.FC<PhaseInspectorModalProps> = ({
               {/* PHASE 10: Validation & Iteration — patch loop, re-run, cycle count */}
               {phase.id === 10 && (
                 <div className="space-y-4">
-                  {/* Validation Loop Header / Interactive Control Box */}
                   <div className="p-4 rounded-lg bg-[#161B22] border border-[#30363D] space-y-3">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <Sparkles className="w-4 h-4 text-emerald-400" />
                         <span className="text-xs font-bold text-gray-200 uppercase tracking-wider">
-                          Automated Patch & Recursive Validation Loop
+                          Retry Loop Outcome
                         </span>
                       </div>
-                      <span className="text-[10px] font-mono bg-indigo-500/10 text-indigo-300 border border-indigo-500/30 px-2 py-0.5 rounded">
-                        Cycle {validationCycle} / 2
-                      </span>
+                      {phase.validationReport?.cycleCount !== undefined && (
+                        <span className="text-[10px] font-mono bg-indigo-500/10 text-indigo-300 border border-indigo-500/30 px-2 py-0.5 rounded">
+                          {phase.validationReport.cycleCount > 1 ? 'Retry loop ran' : 'No retries needed'}
+                        </span>
+                      )}
                     </div>
 
-                    <div className="p-3 rounded bg-[#0D1117] border border-[#30363D] flex items-center justify-between">
-                      <div className="flex items-center gap-2.5">
-                        {simulatedValidationState === 'passed' && (
-                          <CheckCircle2 className="w-5 h-5 text-green-400" />
-                        )}
-                        {simulatedValidationState === 'failed' && (
-                          <XCircle className="w-5 h-5 text-rose-400" />
-                        )}
-                        {simulatedValidationState === 'running' && (
-                          <RotateCw className="w-5 h-5 text-indigo-400 animate-spin" />
-                        )}
-                        {simulatedValidationState === 're_analyzing' && (
-                          <BrainCircuit className="w-5 h-5 text-amber-400 animate-pulse" />
+                    {phase.validationReport?.summary ? (
+                      <div className="p-3 rounded bg-[#0D1117] border border-[#30363D] flex items-start gap-2.5">
+                        {phase.validationReport.regressionFound ? (
+                          <XCircle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
+                        ) : (
+                          <CheckCircle2 className="w-5 h-5 text-green-400 shrink-0 mt-0.5" />
                         )}
                         <div>
                           <div className="text-xs font-bold text-gray-200">
-                            {simulatedValidationState === 'passed' && 'Validation Passed: All 31 Pytest Suites Green'}
-                            {simulatedValidationState === 'failed' && 'Validation Failure: Regression in /auth token endpoint'}
-                            {simulatedValidationState === 'running' && 'Executing Test Suite in Container Sandbox...'}
-                            {simulatedValidationState === 're_analyzing' && 'AI Recursive Loop: Re-analyzing error & synthesizing candidate...'}
+                            {phase.validationReport.regressionFound ? 'Needs Human Review' : 'All Bugs Validated'}
                           </div>
-                          <p className="text-[11px] text-gray-400">
-                            {simulatedValidationState === 'passed' && 'Verified fix generated and applied in isolated sandbox overlay without regressions.'}
-                            {simulatedValidationState === 'failed' && 'Test runner returned exit code 1. Automatic AI re-analysis triggered.'}
-                            {simulatedValidationState === 'running' && 'Running unit, integration, and contract verification test suites...'}
-                            {simulatedValidationState === 're_analyzing' && 'Ingesting new failed test stack trace and generating repaired patch...'}
-                          </p>
+                          <p className="text-[11px] text-gray-400 mt-0.5">{phase.validationReport.summary}</p>
                         </div>
                       </div>
-
-                      <div className="flex items-center gap-2 shrink-0">
-                        <button
-                          type="button"
-                          onClick={() => handleTriggerValidation(false)}
-                          disabled={simulatedValidationState === 'running' || simulatedValidationState === 're_analyzing'}
-                          className="px-3 py-1.5 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold cursor-pointer transition-colors shadow-xs"
-                        >
-                          Re-run Validate
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleTriggerValidation(true)}
-                          disabled={simulatedValidationState === 'running' || simulatedValidationState === 're_analyzing'}
-                          className="px-2.5 py-1.5 rounded bg-[#21262D] hover:bg-[#30363D] text-rose-300 text-xs font-mono border border-[#30363D] hover:border-rose-500/40 cursor-pointer transition-colors"
-                          title="Simulate a test failure to demonstrate AI re-analysis loop"
-                        >
-                          Simulate Fail → AI Loop
-                        </button>
+                    ) : (
+                      <div className="p-4 rounded-lg bg-[#0D1117] border border-[#30363D] text-xs text-gray-400 text-center">
+                        No validation outcome yet — this fills in once Phase 10 actually runs for this analysis.
                       </div>
-                    </div>
-
-                    {/* Unified Diff View */}
-                    <div className="space-y-1.5">
-                      <div className="flex items-center justify-between text-[11px] font-mono text-gray-400">
-                        <span>Unified Diff (src/app/routers/auth.py)</span>
-                        <span className="text-emerald-400 font-semibold">+6 / -2 lines</span>
-                      </div>
-                      <pre className="p-3 rounded bg-[#0B0E14] border border-[#30363D] font-mono text-xs text-gray-300 overflow-x-auto leading-relaxed">
-{`@@ -76,3 +76,7 @@
-- sub = payload.get("sub")
-- user = await get_user_by_id(sub)
-+ if not payload or not isinstance(payload, dict):
-+     raise HTTPException(status_code=401, detail="Invalid token payload")
-+ sub = payload.get("sub")
-+ user = await get_user_by_id(sub)`}
-                      </pre>
-                    </div>
+                    )}
                   </div>
                 </div>
               )}
@@ -547,7 +465,7 @@ export const PhaseInspectorModal: React.FC<PhaseInspectorModalProps> = ({
               )}
 
               {/* PHASES 2 to 7 Generic Overview Cards */}
-              {phase.id !== 1 && phase.id !== 8 && (
+              {phase.id !== 1 && phase.id !== 8 && phase.id !== 10 && (
                 <div className="space-y-4">
                   <div className="p-3.5 rounded-lg bg-[#161B22] border border-[#30363D] flex items-center justify-between">
                     <div>
@@ -573,7 +491,9 @@ export const PhaseInspectorModal: React.FC<PhaseInspectorModalProps> = ({
                       <span className="text-[10px] text-gray-400 uppercase tracking-wider font-sans font-semibold">
                         Runtime Boundary
                       </span>
-                      <div className="text-indigo-300 font-bold">Docker Container (cgroups active)</div>
+                      <div className="text-indigo-300 font-bold">
+                        {phase.id === 7 ? 'Docker Container (cgroups active)' : 'In-process (backend service, no sandbox)'}
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -708,47 +628,67 @@ export const PhaseInspectorModal: React.FC<PhaseInspectorModalProps> = ({
           {/* TAB 4: FINAL AUDIT REPORT (FOR PHASE 10: Validation & Iteration) */}
           {activeTab === 'validation-report' && phase.id === 10 && (
             <div className="space-y-4">
-              <div className="p-4 rounded-lg bg-emerald-950/20 border border-emerald-500/30 space-y-3">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    <CheckCircle className="w-5 h-5 text-emerald-400" />
-                    <span className="text-xs font-bold text-emerald-300 uppercase tracking-wider">
-                      Certified Final AI Fix & Audit Report
-                    </span>
+              {phase.validationReport?.summary ? (
+                <div className={`p-4 rounded-lg space-y-3 ${
+                  phase.validationReport.regressionFound
+                    ? 'bg-rose-950/20 border border-rose-500/30'
+                    : 'bg-emerald-950/20 border border-emerald-500/30'
+                }`}>
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      {phase.validationReport.regressionFound ? (
+                        <XCircle className="w-5 h-5 text-rose-400" />
+                      ) : (
+                        <CheckCircle className="w-5 h-5 text-emerald-400" />
+                      )}
+                      <span className={`text-xs font-bold uppercase tracking-wider ${phase.validationReport.regressionFound ? 'text-rose-300' : 'text-emerald-300'}`}>
+                        Final Audit Report
+                      </span>
+                    </div>
+                    {phase.validationReport.testPassRate && (
+                      <span className={`text-[10px] font-mono px-2 py-0.5 rounded font-semibold border ${
+                        phase.validationReport.regressionFound
+                          ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                          : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                      }`}>
+                        {phase.validationReport.testPassRate} PASS RATE
+                      </span>
+                    )}
                   </div>
-                  <span className="text-[10px] font-mono bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 px-2 py-0.5 rounded font-semibold">
-                    100% PASS RATE
-                  </span>
-                </div>
 
-                <p className="text-xs text-emerald-400/90 leading-relaxed">
-                  {phase.validationReport?.summary || 'BUG-001 (Null pointer in JWT sub claim) resolved cleanly. The patch adds strict dict payload type checks and returns standard HTTP 401 Unauthorized on invalid bearer tokens.'}
-                </p>
+                  <p className={`text-xs leading-relaxed ${phase.validationReport.regressionFound ? 'text-rose-400/90' : 'text-emerald-400/90'}`}>
+                    {phase.validationReport.summary}
+                  </p>
 
-                {/* Audit Metrics */}
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1 text-xs font-mono">
-                  <div className="p-2.5 rounded bg-[#0D1117] border border-[#30363D]">
-                    <div className="text-[10px] text-gray-500">Test Pass Rate</div>
-                    <div className="text-emerald-400 font-bold text-sm">31 / 31 (100%)</div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 pt-1 text-xs font-mono">
+                    <div className="p-2.5 rounded bg-[#0D1117] border border-[#30363D]">
+                      <div className="text-[10px] text-gray-500">Bug Pass Rate</div>
+                      <div className={`font-bold text-sm ${phase.validationReport.regressionFound ? 'text-rose-400' : 'text-emerald-400'}`}>
+                        {phase.validationReport.testPassRate ?? '—'}
+                      </div>
+                    </div>
+                    <div className="p-2.5 rounded bg-[#0D1117] border border-[#30363D]">
+                      <div className="text-[10px] text-gray-500">Needs Human Review</div>
+                      <div className={`font-bold text-sm ${phase.validationReport.regressionFound ? 'text-rose-400' : 'text-emerald-400'}`}>
+                        {phase.validationReport.regressionFound ? `Yes — ${phase.validationReport.failedTests ?? 0} bug(s)` : 'No'}
+                      </div>
+                    </div>
+                    <div className="p-2.5 rounded bg-[#0D1117] border border-[#30363D]">
+                      <div className="text-[10px] text-gray-500">Retry Cycles Run</div>
+                      <div className="text-gray-200 font-bold text-sm">{phase.validationReport.cycleCount ?? 1}</div>
+                    </div>
                   </div>
-                  <div className="p-2.5 rounded bg-[#0D1117] border border-[#30363D]">
-                    <div className="text-[10px] text-gray-500">Regressions Found</div>
-                    <div className="text-emerald-400 font-bold text-sm">0 Detected</div>
-                  </div>
-                  <div className="p-2.5 rounded bg-[#0D1117] border border-[#30363D]">
-                    <div className="text-[10px] text-gray-500">Contract Compliance</div>
-                    <div className="text-emerald-400 font-bold text-sm">OpenAPI 3.0.3 Valid</div>
+
+                  <div className="p-3 rounded bg-[#0D1117] border border-[#30363D] text-xs">
+                    <div className="text-gray-400 font-semibold mb-1">Production Readiness Assessment:</div>
+                    <div className="text-gray-200">{phase.validationReport.recommendation}</div>
                   </div>
                 </div>
-
-                {/* Recommendation */}
-                <div className="p-3 rounded bg-[#0D1117] border border-[#30363D] text-xs">
-                  <div className="text-gray-400 font-semibold mb-1">Production Readiness Assessment:</div>
-                  <div className="text-gray-200">
-                    {phase.validationReport?.recommendation || 'Patch is production-ready. Certified zero-regression across all OpenAPI endpoints.'}
-                  </div>
+              ) : (
+                <div className="p-4 rounded-lg bg-[#161B22] border border-[#30363D] text-xs text-gray-400 text-center">
+                  No audit report yet — this fills in once Phase 10 actually runs for this analysis.
                 </div>
-              </div>
+              )}
             </div>
           )}
 

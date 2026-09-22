@@ -113,6 +113,33 @@ async def set_security_report(
     return phase
 
 
+async def set_validation_report(
+    db: AsyncSession,
+    gateway: RealtimeGateway,
+    analysis_id: str,
+    project_id: str,
+    phase: PipelinePhase,
+    report: dict,
+) -> PipelinePhase:
+    """Persist Phase 10's real Final Audit Report (pass rate, regressions,
+    retry outcome, recommendation) — reuses the validationReport JSON column
+    (already used by Phase 1's securityChecks) under phase-10-specific keys."""
+    phase.validationReport = {**(phase.validationReport or {}), **report}
+    await db.commit()
+    await db.refresh(phase)
+
+    await gateway.publish(
+        project_id,
+        {
+            "type": REALTIME_EVENTS["validation_updated"],
+            "projectId": project_id,
+            "analysisId": analysis_id,
+            "payload": {"number": phase.number, "validationReport": phase.validationReport},
+        },
+    )
+    return phase
+
+
 async def add_log(
     db: AsyncSession,
     gateway: RealtimeGateway,

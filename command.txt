@@ -26,3 +26,7 @@ docker compose restart api
 
 cd ../frontend
 npm run dev
+
+celery 
+
+cd backend && celery -A app.workers.celery_app worker --loglevel=info

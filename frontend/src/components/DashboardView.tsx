@@ -302,6 +302,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ refreshToken, onAn
           ...p,
           validationReport: { ...p.validationReport, securityChecks: payload.securityChecks },
         } : p));
+      } else if (data.type === 'phase.validation') {
+        const payload = data.payload as { number: number; validationReport: PipelinePhase['validationReport'] };
+        setPhases(prev => prev.map(p => p.id === payload.number ? {
+          ...p,
+          validationReport: { ...p.validationReport, ...payload.validationReport },
+        } : p));
       } else if (data.type === 'log.created') {
         const log = data.payload as { id: string; timestamp: string; level: string; category: string; message: string; phaseNumber?: number };
         setLogs(prev => [...prev, {

@@ -22,6 +22,7 @@ REALTIME_EVENTS = {
     "log_created": "log.created",
     "subprocess_updated": "phase.subprocess",
     "security_updated": "phase.security",
+    "validation_updated": "phase.validation",
 }
 
 

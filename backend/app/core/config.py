@@ -3,11 +3,21 @@ Environment configuration.
 Mirrors: backend/src/config/env.ts (zod schema -> pydantic-settings)
 """
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# backend/app/core/config.py -> backend/. Used to anchor STORAGE_ROOT and
+# SANDBOX_WORK_ROOT to an absolute path, so the API server and the Celery
+# worker resolve to the SAME directory regardless of which working directory
+# each process happens to be launched from. A relative default here (e.g.
+# "./storage") silently resolves differently per-process's cwd, which is
+# exactly why an upload can succeed in the API process but the same file
+# can't be found by the worker moments later ("ZIP archive could not be read").
+_BACKEND_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # Expected host for each provider's base URL. Used to catch typos in .env
 # early (at startup) instead of letting them surface as confusing SSL/
@@ -37,14 +47,25 @@ class Settings(BaseSettings):
     JWT_EXPIRES_IN: str = "1h"
     REFRESH_TOKEN_EXPIRES_IN: str = "30d"
 
-    STORAGE_ROOT: str = "./storage"
-    SANDBOX_WORK_ROOT: str = "./sandbox-work"
+    STORAGE_ROOT: str = str(_BACKEND_ROOT / "storage")
+    SANDBOX_WORK_ROOT: str = str(_BACKEND_ROOT / "sandbox-work")
     MAX_UPLOAD_BYTES: int = 524_288_000
     SANDBOX_TIMEOUT_MS: int = 300_000
     SANDBOX_CPU_LIMIT: float = 2
     SANDBOX_MEMORY_LIMIT: str = "4g"
     SANDBOX_PIDS_LIMIT: int = 256
     SANDBOX_NETWORK_MODE: Literal["none", "bridge"] = "none"
+
+    @field_validator("STORAGE_ROOT", "SANDBOX_WORK_ROOT")
+    @classmethod
+    def _resolve_storage_path(cls, value: str) -> str:
+        """Even if .env explicitly sets a relative path (e.g. the
+        .env.example default 'STORAGE_ROOT=./storage'), anchor it to the
+        backend/ directory instead of whatever cwd the process happened to
+        start from — this is what makes the API server and worker agree on
+        the same real path for the same file."""
+        path = Path(value)
+        return str(path if path.is_absolute() else (_BACKEND_ROOT / path).resolve())
 
     GITHUB_API_URL: str = "https://api.github.com"
     GITHUB_APP_CLIENT_ID: str | None = None
