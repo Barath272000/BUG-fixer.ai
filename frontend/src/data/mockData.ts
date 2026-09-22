@@ -503,7 +503,7 @@ export const pipelinePhases: PipelinePhase[] = [
   {
     id: 3,
     name: 'Static Analysis',
-    description: 'Zero-AI deterministic AST linters (flake8, ruff, bandit) in a lightweight container',
+    description: 'Zero-AI deterministic AST linters (flake8, ruff, mypy, bandit) & pip-audit dependency vulnerability scan',
     duration: '',
     status: 'pending',
     subtasks: [],
@@ -539,7 +539,7 @@ export const pipelinePhases: PipelinePhase[] = [
   {
     id: 7,
     name: 'Isolated Environment',
-    description: 'Provision Docker container sandbox with resource limits & persistent workspace',
+    description: 'Create isolated Docker sandbox container & configure database sidecar (Postgres/MySQL) network + env vars for Phase 8',
     duration: '',
     status: 'pending',
     subtasks: [],

@@ -6,6 +6,15 @@ build/test -- see modules/sandbox), and a parser that turns that tool's
 raw stdout into a list of plain finding dicts:
     {tool, severity, file, line, code, message}
 
+Covers, per the Static Analysis phase card's 5 listed categories:
+  - Syntax errors   -> flake8
+  - Lint errors     -> flake8, ruff
+  - Type errors     -> mypy
+  - Security issues -> bandit (code-level)
+  - Dependency issues -> pip-audit (known-vulnerable versions in
+    requirements.txt, via the OSV database -- needs network; see
+    SANDBOX_NETWORK_MODE)
+
 HONEST GAP: only Python has real linters registered right now. JS/TS/Go/
 Rust fall through to the "unsupported" path in service.py rather than
 fabricating results -- matches the existing GitHub-source honest-gap
@@ -108,6 +117,37 @@ def _parse_ruff(stdout: str) -> list[dict]:
     return findings
 
 
+def _parse_pip_audit(stdout: str) -> list[dict]:
+    """pip-audit -f json output. Flags known-vulnerable dependency versions
+    from requirements.txt against the OSV database. Requires network
+    access (SANDBOX_NETWORK_MODE must not be "none") -- if the sandbox has
+    no network this call fails and yields zero findings rather than a
+    false "clean" result (see the command's own guard in linter_registry).
+    """
+    findings = []
+    try:
+        data = json.loads(stdout or "{}")
+    except json.JSONDecodeError:
+        return findings
+    # pip-audit's schema: {"dependencies": [{"name","version","vulns":[...]}]}
+    for dep in data.get("dependencies", []):
+        vulns = dep.get("vulns") or []
+        for vuln in vulns:
+            fix_versions = vuln.get("fix_versions") or []
+            message = (vuln.get("description") or "").strip()
+            if fix_versions:
+                message = f"{message} (fix: upgrade to {', '.join(fix_versions)})".strip()
+            findings.append({
+                "tool": "pip-audit",
+                "severity": "high",
+                "file": "requirements.txt",
+                "line": None,
+                "code": vuln.get("id"),
+                "message": message or f"Known vulnerability in {dep.get('name')} {dep.get('version')}",
+            })
+    return findings
+
+
 PYTHON_LINTERS = [
     {
         "name": "flake8",
@@ -128,6 +168,19 @@ PYTHON_LINTERS = [
         "name": "ruff",
         "command": "pip install --quiet ruff && ruff check --output-format=json .",
         "parser": _parse_ruff,
+    },
+    {
+        "name": "pip-audit",
+        # Skips cleanly (empty JSON array output) if there's no
+        # requirements.txt, rather than erroring the whole phase -- same
+        # honest-gap pattern as the other linters here.
+        "command": (
+            "[ -f requirements.txt ] && "
+            "pip install --quiet pip-audit && "
+            "pip-audit -r requirements.txt -f json --progress-spinner=off "
+            "|| echo '{\"dependencies\": []}'"
+        ),
+        "parser": _parse_pip_audit,
     },
 ]
 

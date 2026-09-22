@@ -60,7 +60,7 @@ PIPELINE_DEFINITIONS = [
     {
         "number": 7,
         "name": "Isolated Environment",
-        "description": "Provision Docker container sandbox with resource limits & persistent workspace",
+        "description": "Create isolated Docker sandbox container & configure database sidecar (Postgres/MySQL) network + env vars for Phase 8",
     },
     {
         "number": 8,

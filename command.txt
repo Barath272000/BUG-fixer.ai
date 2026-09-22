@@ -36,3 +36,9 @@ stop command
 docker compose stop redis postgres
 
 docker compose kill redis postgres
+
+alambic 
+
+cd /workspaces/BUG-fixer.ai/backend
+source .venv/bin/activate
+alembic upgrade head

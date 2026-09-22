@@ -25,6 +25,7 @@ phase_manager.PIPELINE_DEFINITIONS / the frontend dashboard exactly:
 HONEST GAP: GitHub-sourced projects (sourceType == GITHUB) still fail with
 a clear error at Phase 1 -- unchanged from before, not part of this rewrite.
 """
+import asyncio
 import os
 import shutil
 import tempfile
@@ -55,10 +56,13 @@ from app.modules.analysis.phase_manager import PIPELINE_DEFINITIONS
 from app.modules.analysis.pipeline_service import add_log, set_security_report, set_subprocesses, set_validation_report
 from app.modules.code_analysis.project_inspector import inspect_project
 from app.modules.sandbox.db_sidecar import start_database_sidecar, stop_database_sidecar
+from app.modules.sandbox.container_manager import (
+    start_preview_container, stop_preview_container, is_container_running, get_container_logs,
+)
 from app.modules.static_analysis.service import run_static_analysis
 from app.modules.bugs.service import create_bug_from_error
 from app.modules.errors.error_collector import fingerprint, record_error
-from app.modules.errors.test_result_parser import parse_generic_test_output
+from app.modules.errors.test_result_parser import parse_generic_test_output, categorize_test_output
 from app.modules.sandbox.sandbox_service import run_sandbox
 from app.modules.uploads.security_scanner import run_security_scan
 from app.modules.uploads.zip_extractor import extract_archive
@@ -152,6 +156,79 @@ def _phase_steps(items: list[tuple[str, str, str]]) -> list[dict]:
         {"id": step_id, "name": name, "completed": False, "status": "pending", "category": category}
         for step_id, name, category in items
     ]
+
+
+async def _check_application_starts(
+    db: AsyncSession,
+    gateway: RealtimeGateway,
+    analysis_id: str,
+    project_id: str,
+    project: Project,
+    phase: PipelinePhase,
+    work_root: str,
+    language: str,
+    subprocesses: list[dict],
+) -> None:
+    """Phase 8 (Job: 'Start application'). Best-effort, same honesty level
+    as detect_preview() itself: not every project is a long-running web
+    server, so a project with no previewCommand (Phase 2 couldn't detect
+    one) SKIPS this step rather than failing it -- there's nothing to
+    start. This deliberately does NOT raise PipelineError on a crash: a
+    project failing to boot as a live server is real signal worth a Bug,
+    but treating it as fatal would block Phase 8's actual test run even
+    for projects that are libraries/CLIs with previewCommand=None, or
+    where the preview guess itself was wrong (see detect_preview's own
+    caveat about host="0.0.0.0" binding)."""
+    if not project.previewCommand:
+        await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "start_application", "completed",
+                                  {"result": "skipped — no runnable entrypoint detected for this project"})
+        return
+
+    await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "start_application", "running")
+    container_name = f"bugfixer-startcheck-{analysis_id}"
+    started = await start_preview_container(work_root, project.previewCommand, language, project.previewPort or 8000, container_name)
+
+    if not started.get("ok"):
+        # Exited immediately -- container_manager already tried `docker port`
+        # and failed, meaning the process never bound anything.
+        error = await record_error(
+            db, project_id, f"Application failed to start: {project.previewCommand}",
+            analysis_run_id=analysis_id, name="AppStartError", stack_trace=started.get("error", ""),
+            source="runtime",
+        )
+        await create_bug_from_error(db, project, error)
+        await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "start_application", "failed",
+                                  {"error": started.get("error", "")[:300]})
+        await add_log(db, gateway, analysis_id, project_id, "ERROR", "Start Application",
+                      f"App failed to start: {started.get('error', '')[:2000]}", phase.id, phase.number)
+        return
+
+    try:
+        # Give it a moment to crash on boot before we call it "started" --
+        # a container can be `docker run -d` successfully and still crash
+        # a second later (e.g. an unhandled exception right after bind()).
+        await asyncio.sleep(3)
+        still_running = await is_container_running(container_name)
+        logs = await get_container_logs(container_name)
+
+        if still_running:
+            await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "start_application", "completed",
+                                      {"hostPort": str(started.get("hostPort")), "logsBytes": str(len(logs))})
+            await add_log(db, gateway, analysis_id, project_id, "PASS", "Start Application",
+                          f"Application started and stayed up ({project.previewCommand})", phase.id, phase.number)
+        else:
+            error = await record_error(
+                db, project_id, f"Application crashed shortly after starting: {project.previewCommand}",
+                analysis_run_id=analysis_id, name="AppRuntimeError", stack_trace=logs,
+                source="runtime",
+            )
+            await create_bug_from_error(db, project, error)
+            await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "start_application", "failed",
+                                      {"logsBytes": str(len(logs))})
+            await add_log(db, gateway, analysis_id, project_id, "ERROR", "Start Application",
+                          f"App crashed after starting: {logs[:2000]}", phase.id, phase.number)
+    finally:
+        await stop_preview_container(container_name)
 
 
 async def _run_isolated_environment(
@@ -752,9 +829,10 @@ async def run_analysis_pipeline(
                     ("detect_build_command", "Detect build command", "build"),
                     ("execute_build", "Execute build in sandbox", "build"),
                     ("capture_build_output", "Capture build output and exit code", "build"),
+                    ("start_application", "Start application & capture runtime errors", "runtime"),
                     ("detect_test_command", "Detect test command", "testing"),
                     ("execute_tests", "Execute tests in sandbox", "testing"),
-                    ("parse_test_results", "Parse and persist test results", "testing"),
+                    ("parse_test_results", "Parse, categorize & persist test results", "testing"),
                 ])
                 await set_subprocesses(db, gateway, analysis_id, project_id, phase, subprocesses)
 
@@ -784,6 +862,11 @@ async def run_analysis_pipeline(
                 await add_log(db, gateway, analysis_id, project_id, "PASS", "Install & Build",
                               f"Build succeeded with {build_command}", phase.id, phase.number)
 
+                # --- Start Application (Job: 'Start application') ---
+                await _check_application_starts(
+                    db, gateway, analysis_id, project_id, project, phase, work_root, language, subprocesses,
+                )
+
                 # --- Run & Test ---
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "detect_test_command", "running")
                 test_command = await detect_test_command(work_root, language)
@@ -795,6 +878,7 @@ async def run_analysis_pipeline(
                     extra_env=db_sidecar["env"] if db_sidecar else None,
                 )
                 summary = parse_generic_test_output(test_result.stdout, test_result.stderr, test_result.code)
+                categories = categorize_test_output(test_result.stdout)
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "execute_tests", "completed" if test_result.code == 0 or summary.status == "NO_TESTS" else "failed", {"durationMs": str(test_result.duration_ms)})
 
                 db.add(TestRun(
@@ -804,7 +888,23 @@ async def run_analysis_pipeline(
                     stdout=test_result.stdout[:100000], stderr=test_result.stderr[:100000],
                 ))
                 await db.commit()
-                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "parse_test_results", "completed", {"status": summary.status, "total": str(summary.total), "passed": str(summary.passed), "failed": str(summary.failed)})
+                category_metrics = {
+                    "status": summary.status, "total": str(summary.total),
+                    "passed": str(summary.passed), "failed": str(summary.failed),
+                }
+                if categories:
+                    # Only attached when categorize_test_output actually found
+                    # pytest -v per-test lines to bucket -- absent for
+                    # Go/Rust/JS or non-verbose output, matching the honest-gap
+                    # pattern (no fabricated zeros for what we can't detect).
+                    for name, counts in categories.items():
+                        category_metrics[f"{name}Tests"] = f"{counts.passed}/{counts.total}"
+                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "parse_test_results", "completed", category_metrics)
+
+                if categories:
+                    breakdown = ", ".join(f"{n}: {c.passed}/{c.total}" for n, c in categories.items() if c.total)
+                    await add_log(db, gateway, analysis_id, project_id, "INFO", "Testing",
+                                  f"Test breakdown by type — {breakdown}", phase.id, phase.number)
 
                 if summary.status == "NO_TESTS":
                     await add_log(db, gateway, analysis_id, project_id, "WARN", "Testing",
@@ -879,6 +979,21 @@ async def run_analysis_pipeline(
                 failing_bug_ids = [bug_id for bug_id, r in run_regression_results.items() if not r["passed"]]
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "evaluate_results", "completed",
                                           {"failing": str(len(failing_bug_ids)), "passing": str(len(run_regression_results) - len(failing_bug_ids))})
+
+                # GAP FIX: bugs that passed Phase 9's regression check on the
+                # first try (never entered the retry loop below) previously
+                # never had their status flipped to Fixed at all -- only the
+                # retry-loop branch a few lines down did that. A clean
+                # one-shot fix would validate successfully but Bug List
+                # would still show it as unresolved. Mark those here,
+                # before the retry loop handles the ones that DID fail.
+                first_try_passed_ids = [bug_id for bug_id, r in run_regression_results.items() if r["passed"]]
+                for bug_id in first_try_passed_ids:
+                    bug = await db.get(Bug, bug_id)
+                    if bug is not None:
+                        bug.status = BugStatus.Fixed
+                if first_try_passed_ids:
+                    await db.commit()
 
                 await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "retry_loop", "running")
                 fixed_on_retry: list[str] = []

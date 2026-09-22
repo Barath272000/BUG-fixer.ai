@@ -143,3 +143,27 @@ async def stop_preview_container(name: str) -> None:
         stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
     )
     await proc.wait()  # no-op (exit code ignored) if the container doesn't exist
+
+
+async def is_container_running(name: str) -> bool:
+    """Used by Phase 8's automatic app-start health check (not the manual
+    Preview feature, which doesn't need this) to tell "started and is still
+    up after N seconds" apart from "started, then crashed immediately"."""
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "inspect", "-f", "{{.State.Running}}", name,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+    )
+    out_b, _ = await proc.communicate()
+    return proc.returncode == 0 and out_b.decode().strip() == "true"
+
+
+async def get_container_logs(name: str, tail: int = 200) -> str:
+    """Captures real stdout+stderr from a running/just-stopped container --
+    used by Phase 8's app-start check to report why a boot crashed, same
+    way build/test failures already capture real command output."""
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "logs", "--tail", str(tail), name,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+    )
+    out_b, _ = await proc.communicate()
+    return out_b.decode(errors="replace")

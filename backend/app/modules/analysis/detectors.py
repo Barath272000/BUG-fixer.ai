@@ -39,7 +39,10 @@ async def detect_test_command(root: str, language: str) -> str:
             # If the sandbox has no network (SANDBOX_NETWORK_MODE=none, the
             # default), this install is a no-op and the run fails honestly
             # with "pytest: not found" rather than silently passing.
-            return "pip install -q pytest 2>/dev/null; pytest"
+            # -v (verbose): needed for categorize_test_output() to bucket
+            # unit/integration/api results by file path -- the default
+            # non-verbose summary line has no per-test detail to categorize.
+            return "pip install -q pytest 2>/dev/null; pytest -v"
         return "python -m unittest discover"
     if language in ("JavaScript", "TypeScript"):
         pkg_path = os.path.join(root, "package.json")
