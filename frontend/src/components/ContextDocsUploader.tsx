@@ -58,8 +58,20 @@ export const ContextDocsUploader: React.FC<ContextDocsUploaderProps> = ({
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
+    ingestFiles(Array.from(files));
+    if (fileInputRef.current) {
+      fileInputRef.current.value = '';
+    }
+  };
 
-    Array.from(files).forEach((file: File) => {
+  /** Builds a local placeholder doc immediately for responsive UI, keeping
+   * the raw File so the real upload (handleStartAnalysis, once a project
+   * id exists) can send it to the backend for real parsing/storage. PDFs
+   * are never read with FileReader.readAsText -- that produces garbled
+   * binary-as-text; the real extracted text comes back from the server
+   * after upload and replaces this placeholder's `content`. */
+  const ingestFiles = (files: File[]) => {
+    files.forEach((file: File) => {
       const extension = file.name.split('.').pop()?.toLowerCase();
       let type: ContextDoc['type'] = 'text';
       if (extension === 'md' || extension === 'markdown') type = 'markdown';
@@ -68,27 +80,31 @@ export const ContextDocsUploader: React.FC<ContextDocsUploaderProps> = ({
       else if (extension === 'pdf') type = 'pdf';
       else if (extension === 'prisma' || extension === 'sql') type = 'schema';
 
+      const baseDoc: ContextDoc = {
+        id: `local-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        name: file.name,
+        size: `${(file.size / 1024).toFixed(1)} KB`,
+        type,
+        content: '',
+        uploadedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        description: `Uploaded ${type.toUpperCase()} context file`,
+        file
+      };
+
+      if (type === 'pdf') {
+        // Real text is extracted server-side (pypdf) once this uploads.
+        onAddDoc(baseDoc);
+        return;
+      }
+
       const reader = new FileReader();
       reader.onload = (event) => {
         const content = (event.target?.result as string) || '';
-        const newDoc: ContextDoc = {
-          id: `${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-          name: file.name,
-          size: `${(file.size / 1024).toFixed(1)} KB`,
-          type,
-          content,
-          uploadedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          description: `Uploaded ${type.toUpperCase()} context file`
-        };
-        onAddDoc(newDoc);
+        onAddDoc({ ...baseDoc, content });
       };
+      reader.onerror = () => onAddDoc(baseDoc);
       reader.readAsText(file);
     });
-
-    // Reset input
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
-    }
   };
 
   const handleDrop = (e: React.DragEvent) => {
@@ -96,31 +112,7 @@ export const ContextDocsUploader: React.FC<ContextDocsUploaderProps> = ({
     setIsDragging(false);
     const files = e.dataTransfer.files;
     if (!files || files.length === 0) return;
-
-    Array.from(files).forEach((file: File) => {
-      const extension = file.name.split('.').pop()?.toLowerCase();
-      let type: ContextDoc['type'] = 'text';
-      if (extension === 'md' || extension === 'markdown') type = 'markdown';
-      else if (extension === 'json') type = 'json';
-      else if (extension === 'yaml' || extension === 'yml') type = 'openapi';
-      else if (extension === 'pdf') type = 'pdf';
-
-      const reader = new FileReader();
-      reader.onload = (event) => {
-        const content = (event.target?.result as string) || '';
-        const newDoc: ContextDoc = {
-          id: `${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-          name: file.name,
-          size: `${(file.size / 1024).toFixed(1)} KB`,
-          type,
-          content,
-          uploadedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          description: `Uploaded ${type.toUpperCase()} file`
-        };
-        onAddDoc(newDoc);
-      };
-      reader.readAsText(file);
-    });
+    ingestFiles(Array.from(files));
   };
 
   return (

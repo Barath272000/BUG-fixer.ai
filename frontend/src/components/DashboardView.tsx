@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import React, { useEffect, useRef, useState } from 'react';
 import { apiRequest, getRealtimeSocketUrl, uploadProjectArchive } from '../api/client';
+import { uploadContextDoc, deleteContextDocApi } from '../api/contextDocs';
 import { getGithubTokenStatus, parseGithubUrl } from '../api/github';
 import { pipelinePhases as initialPipelinePhases, initialFixAttempts, initialPreviewCheckpoint } from '../data/mockData';
 import { ContextDoc, FixAttempt, PipelinePhase, PreviewCheckpoint, PreviewCheckpointFileEdit } from '../types';
@@ -249,10 +250,25 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ refreshToken, onAn
   };
 
   const handleRemoveContextDoc = (id: string) => {
+    const doc = contextDocs.find(d => d.id === id);
     setContextDocs(prev => prev.filter(d => d.id !== id));
+    // Only real, server-persisted docs (not a "local-" placeholder still
+    // waiting for a project to exist) need a delete call.
+    if (projectId && doc && !id.startsWith('local-')) {
+      void deleteContextDocApi(projectId, id).catch(() => {
+        // Best-effort -- the doc is already gone from local state either way.
+      });
+    }
   };
 
   const handleClearAllContextDocs = () => {
+    if (projectId) {
+      contextDocs.forEach(doc => {
+        if (!doc.id.startsWith('local-')) {
+          void deleteContextDocApi(projectId, doc.id).catch(() => {});
+        }
+      });
+    }
     setContextDocs([]);
   };
 
@@ -378,6 +394,33 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ refreshToken, onAn
         category: 'upload',
         message: `Uploaded ${uploadedFile.name}, SHA-256 ${upload.sha256.slice(0, 16)}…`,
       }]);
+
+      // Push any context docs picked before the project existed (Phase 1's
+      // pre-upload screen) to the real backend now that we have a project
+      // id -- this is what actually gets them into Phase 5/6's AI context,
+      // instead of leaving them stranded in local-only React state.
+      const pendingDocs = contextDocs.filter(d => d.id.startsWith('local-') && d.file);
+      for (const doc of pendingDocs) {
+        try {
+          const uploaded = await uploadContextDoc(project.id, doc.file as File, doc.description);
+          setContextDocs(prev => prev.map(d => (d.id === doc.id ? uploaded : d)));
+          setLogs(prev => [...prev, {
+            id: `${Date.now()}-ctx-${doc.id}`,
+            timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
+            level: 'PASS',
+            category: 'upload',
+            message: `Context doc bound: ${doc.name}`,
+          }]);
+        } catch (err) {
+          setLogs(prev => [...prev, {
+            id: `${Date.now()}-ctx-err-${doc.id}`,
+            timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
+            level: 'WARN',
+            category: 'upload',
+            message: `Context doc "${doc.name}" failed to upload: ${err instanceof Error ? err.message : 'unknown error'}`,
+          }]);
+        }
+      }
 
       const run = await apiRequest<{ id: string }>(`/analysis/projects/${project.id}/run`, { method: 'POST' });
 

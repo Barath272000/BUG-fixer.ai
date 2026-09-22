@@ -30,3 +30,9 @@ npm run dev
 celery 
 
 cd backend && celery -A app.workers.celery_app worker --loglevel=info
+
+stop command 
+
+docker compose stop redis postgres
+
+docker compose kill redis postgres

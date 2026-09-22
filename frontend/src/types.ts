@@ -182,6 +182,12 @@ export interface ContextDoc {
   content?: string;
   uploadedAt: string;
   description?: string;
+  /** Present only for a doc picked before a project exists yet (Phase 1's
+   * pre-upload screen) -- holds the raw File so handleStartAnalysis can
+   * actually upload it once a real project id exists. Never sent to the
+   * backend itself (see api/contextDocs.ts, which sends `file` as
+   * multipart form data, not this field). Cleared once uploaded. */
+  file?: File;
 }
 
 export type NotificationType = 'critical' | 'fix' | 'security' | 'system' | 'info';
