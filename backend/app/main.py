@@ -92,6 +92,10 @@ def create_app() -> FastAPI:
     async def health():
         return {"status": "ok", "service": "bugfixai-backend", "version": "1.0.0"}
 
+    @app.get("/api/v1/health")
+    async def api_health():
+        return {"status": "ok", "service": "bugfixai-backend", "version": "1.0.0"}
+
     # --- Route mounting ---
     from app.modules.auth.router import router as auth_router
     from app.modules.users.router import router as users_router
