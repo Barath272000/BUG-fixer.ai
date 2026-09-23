@@ -92,6 +92,21 @@ export async function getAnalysisRun(analysisId: string): Promise<{ run: any; ph
   };
 }
 
+export interface LatestAnalysisRun {
+  id: string;
+  status: AnalysisRunStatus;
+}
+
+/** Most recent analysis run for a project (backend already returns the list
+ * newest-first), or null if the project has never had a run. Used by the
+ * Workspace IDE's Output tab so it can show real pipeline logs without the
+ * caller needing to thread analysisId state down from DashboardView. */
+export async function fetchLatestAnalysisRun(projectId: string): Promise<LatestAnalysisRun | null> {
+  const runs = await apiRequest<Array<{ id: string; status: string }>>(`/analysis/projects/${encodeURIComponent(projectId)}`);
+  const latest = runs[0];
+  return latest ? { id: latest.id, status: latest.status as AnalysisRunStatus } : null;
+}
+
 export async function getCheckpoint(analysisId: string): Promise<PreviewCheckpoint> {
   const checkpoint = await apiRequest<any>(`/analysis/${encodeURIComponent(analysisId)}/checkpoint`);
   return normalizeCheckpoint(checkpoint);

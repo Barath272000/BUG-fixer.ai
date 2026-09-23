@@ -88,13 +88,20 @@ export interface WorkspaceExecResult {
   stderr: string;
   code: number;
   durationMs: number;
+  /** Workspace-relative dir the shell ended up in (reflects any `cd` the
+   * command did). Pass this back in as `cwd` on the next call so `cd`
+   * feels persistent even though each command runs in a fresh container. */
+  cwd: string;
 }
 
-export async function execWorkspaceCommand(projectId: string, command: string): Promise<WorkspaceExecResult> {
+/** cwd: workspace-relative directory to run from (e.g. "backend"), sourced
+ * from the previous call's WorkspaceExecResult.cwd. Omit/empty for the
+ * workspace root. */
+export async function execWorkspaceCommand(projectId: string, command: string, cwd?: string): Promise<WorkspaceExecResult> {
   const workspaceId = await resolveWorkspaceId(projectId);
   return apiRequest<WorkspaceExecResult>(`/workspaces/${workspaceId}/exec`, {
     method: 'POST',
-    body: { command },
+    body: { command, cwd: cwd ?? '' },
   });
 }
 

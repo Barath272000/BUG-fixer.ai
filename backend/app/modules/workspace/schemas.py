@@ -29,6 +29,12 @@ class WriteFileResponse(BaseModel):
 
 class ExecRequest(BaseModel):
     command: str
+    # Workspace-relative directory (no leading slash) the command should run
+    # from, e.g. "backend". Empty/omitted means the workspace root. The
+    # client round-trips this from the previous ExecResult.cwd so `cd`
+    # persists across commands even though each one runs in a fresh,
+    # disposable sandbox container -- see exec_command() for how.
+    cwd: str = ""
 
 
 class ExecResult(BaseModel):
@@ -36,6 +42,10 @@ class ExecResult(BaseModel):
     stderr: str
     code: int
     durationMs: int
+    # Workspace-relative directory the shell ended up in after this command
+    # (reflects any `cd` the command itself did). Echo this back as the next
+    # request's `cwd` to keep a persistent-feeling shell session.
+    cwd: str
 
 
 class SearchMatch(BaseModel):

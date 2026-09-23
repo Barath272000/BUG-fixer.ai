@@ -135,12 +135,50 @@ async def create_folder(db: AsyncSession, user_id: str, workspace_id: str, path:
 
 
 # --- Terminal: runs inside the Docker sandbox module (app.modules.sandbox). ---
-async def exec_command(db: AsyncSession, user_id: str, workspace_id: str, command: str) -> ExecResult:
+#
+# Each command still runs in its own fresh, disposable container (see
+# container_manager.execute_in_docker: `docker run --rm ...`) -- there is no
+# long-lived shell process to keep state in. To still make `cd` feel
+# persistent across commands the way a real terminal does, every exec:
+#   1. cd's into the *previous* result's ending directory before running the
+#      user's command (passed in as ExecRequest.cwd, sourced from an env var
+#      rather than interpolated into the script, so it can't break out of
+#      the shell string no matter what a client sends).
+#   2. appends a trailing marker line that captures the real `pwd` and exit
+#      code of the user's command specifically (not of our wrapper's own
+#      trailing commands, which would otherwise always report 0).
+#   3. parses that marker back out before returning stdout, and reports the
+#      resulting directory as ExecResult.cwd for the client to send next time.
+_CWD_MARKER = "###BUGFIXER_EXEC_STATE###"
+
+
+def _normalize_cwd(cwd: str) -> str:
+    """Workspace-relative dir, no leading/trailing slashes, no `..` escape."""
+    cleaned = (cwd or "").strip().strip("/")
+    if not cleaned:
+        return ""
+    normalized = os.path.normpath(cleaned).replace(os.sep, "/")
+    if normalized == "." :
+        return ""
+    if normalized == ".." or normalized.startswith("../"):
+        return ""  # don't let a stale/tampered cwd wander outside the workspace
+    return normalized
+
+
+async def exec_command(db: AsyncSession, user_id: str, workspace_id: str, command: str, cwd: str = "") -> ExecResult:
     ws = await workspace_for(db, user_id, workspace_id)
     if not command.strip():
         raise AppError(400, "EMPTY_COMMAND", "Command is required")
+
+    start_cwd = _normalize_cwd(cwd)
+    wrapped = (
+        'cd "/workspace/$BF_START_CWD" 2>/dev/null || cd /workspace; '
+        f"{command}\n"
+        f'__bf_ec=$?; printf "\\n{_CWD_MARKER}%s|%s\\n" "$(pwd)" "$__bf_ec"'
+    )
+
     try:
-        result = await run_sandbox(ws.rootPath, command)
+        result = await run_sandbox(ws.rootPath, wrapped, extra_env={"BF_START_CWD": start_cwd})
     except FileNotFoundError as exc:
         # `docker` CLI isn't installed / on PATH in this environment.
         raise AppError(
@@ -151,7 +189,22 @@ async def exec_command(db: AsyncSession, user_id: str, workspace_id: str, comman
         ) from exc
     except OSError as exc:
         raise AppError(503, "SANDBOX_UNAVAILABLE", f"Could not start the sandbox container: {exc}") from exc
-    return ExecResult(stdout=result.stdout, stderr=result.stderr, code=result.code, durationMs=result.duration_ms)
+
+    stdout = result.stdout
+    exit_code = result.code
+    end_cwd = start_cwd
+    marker_idx = stdout.rfind(_CWD_MARKER)
+    if marker_idx != -1:
+        visible_stdout = stdout[:marker_idx].rstrip("\n")
+        tail = stdout[marker_idx + len(_CWD_MARKER):].strip()
+        pwd_part, _, ec_part = tail.partition("|")
+        if pwd_part.startswith("/workspace"):
+            end_cwd = _normalize_cwd(pwd_part[len("/workspace"):])
+        if ec_part.strip().lstrip("-").isdigit():
+            exit_code = int(ec_part.strip())
+        stdout = visible_stdout
+
+    return ExecResult(stdout=stdout, stderr=result.stderr, code=exit_code, durationMs=result.duration_ms, cwd=end_cwd)
 
 
 def _collect_searchable_files(root: str, current: str, depth: int, out: list[str]) -> None:

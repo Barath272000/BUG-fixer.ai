@@ -110,7 +110,7 @@ async def post_exec(
     current_user: AuthUser = Depends(require_auth),
     db: AsyncSession = Depends(get_db),
 ):
-    return await exec_command(db, current_user.id, workspace_id, payload.command)
+    return await exec_command(db, current_user.id, workspace_id, payload.command, payload.cwd)
 
 
 @router.get("/{workspace_id}/search", response_model=list[SearchMatch])

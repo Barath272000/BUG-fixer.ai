@@ -27,7 +27,7 @@ import {
 } from 'lucide-react';
 import Editor, { OnMount } from '@monaco-editor/react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bug as BugType } from '../types';
+import { Bug as BugType, LogLine } from '../types';
 import {
   fetchWorkspaceFile,
   fetchWorkspaceTree,
@@ -44,6 +44,7 @@ import {
   renameWorkspacePath,
   createWorkspaceFolder,
 } from '../api/workspace';
+import { fetchAnalysisLogs, fetchLatestAnalysisRun } from '../api/analysis';
 import { ApiError } from '../api/client';
 import { addRecentFile } from '../utils/recentFiles';
 import { AgentPanel } from './Agentpanel';
@@ -268,22 +269,34 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
   }, [activityView, loadGitStatus]);
 
   // --- Terminal (real) ---
-  interface TerminalEntry { command: string; stdout: string; stderr: string; code: number }
+  // Each command still runs in its own disposable sandbox container on the
+  // backend (no long-lived shell process) -- but exec_command() now cd's
+  // into the previous command's ending directory before running the next
+  // one and hands back where it ended up, so `cd backend` really does
+  // "stick" for the commands you run after it, the way a real terminal
+  // feels, even though nothing is actually kept running between calls.
+  interface TerminalEntry { command: string; stdout: string; stderr: string; code: number; cwd: string }
   const [terminalHistory, setTerminalHistory] = useState<TerminalEntry[]>([]);
   const [terminalInput, setTerminalInput] = useState('');
   const [terminalRunning, setTerminalRunning] = useState(false);
+  const [terminalCwd, setTerminalCwd] = useState('');
   const terminalEndRef = useRef<HTMLDivElement>(null);
 
   const runTerminalCommand = async (command: string) => {
     if (!projectId || !command.trim() || terminalRunning) return;
     setTerminalInput('');
     setTerminalRunning(true);
+    const cwdAtRun = terminalCwd;
     try {
-      const result = await execWorkspaceCommand(projectId, command);
-      setTerminalHistory(prev => [...prev, { command, stdout: result.stdout, stderr: result.stderr, code: result.code }]);
+      const result = await execWorkspaceCommand(projectId, command, cwdAtRun);
+      setTerminalHistory(prev => [...prev, { command, stdout: result.stdout, stderr: result.stderr, code: result.code, cwd: cwdAtRun }]);
+      setTerminalCwd(result.cwd);
     } catch (err) {
       const message = err instanceof ApiError ? err.message : 'Command failed to run.';
-      setTerminalHistory(prev => [...prev, { command, stdout: '', stderr: message, code: 1 }]);
+      // A request-level failure (network/API error, not the command itself
+      // failing) shouldn't silently reset the working directory the user
+      // was in.
+      setTerminalHistory(prev => [...prev, { command, stdout: '', stderr: message, code: 1, cwd: cwdAtRun }]);
     } finally {
       setTerminalRunning(false);
     }
@@ -292,6 +305,61 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
   useEffect(() => {
     terminalEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [terminalHistory]);
+
+  // --- Output (real) — the most recent analysis run's pipeline logs for
+  // this project, same data source as the Dashboard's per-phase Raw Logs
+  // tab (fetchAnalysisLogs), just unfiltered by phase and shown here too.
+  const [outputRunId, setOutputRunId] = useState<string | null>(null);
+  const [outputRunStatus, setOutputRunStatus] = useState<string | null>(null);
+  const [outputLogs, setOutputLogs] = useState<LogLine[]>([]);
+  const [outputLoading, setOutputLoading] = useState(false);
+  const [outputError, setOutputError] = useState<string | null>(null);
+  const outputEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (bottomTab !== 'output' || !projectId) return;
+    let cancelled = false;
+
+    const load = async (showSpinner: boolean) => {
+      if (showSpinner) setOutputLoading(true);
+      try {
+        const latest = await fetchLatestAnalysisRun(projectId);
+        if (cancelled) return;
+        if (!latest) {
+          setOutputRunId(null);
+          setOutputRunStatus(null);
+          setOutputLogs([]);
+          setOutputError(null);
+          return;
+        }
+        setOutputRunId(latest.id);
+        setOutputRunStatus(latest.status);
+        const logs = await fetchAnalysisLogs(latest.id);
+        if (!cancelled) {
+          setOutputLogs(logs);
+          setOutputError(null);
+        }
+      } catch (err) {
+        if (!cancelled) setOutputError(err instanceof ApiError ? err.message : 'Could not load output logs.');
+      } finally {
+        if (!cancelled && showSpinner) setOutputLoading(false);
+      }
+    };
+
+    void load(true);
+    const isRunning = outputRunStatus === 'RUNNING' || outputRunStatus === 'AWAITING_REVIEW';
+    const intervalId = isRunning ? window.setInterval(() => void load(false), 2000) : null;
+
+    return () => {
+      cancelled = true;
+      if (intervalId) window.clearInterval(intervalId);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bottomTab, projectId, outputRunStatus]);
+
+  useEffect(() => {
+    outputEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [outputLogs]);
 
   // --- Go to File quick-picker (Ctrl+P) ---
   const [isGoToFileOpen, setIsGoToFileOpen] = useState(false);
@@ -1518,14 +1586,52 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
               )}
 
               {bottomTab === 'output' && (
-                <p className="text-[#858585]">
-                  Output streaming isn't wired into this panel yet — the live pipeline logs currently show on the Dashboard tab. Not built yet.
-                </p>
+                <div className="flex flex-col h-full font-mono">
+                  {!projectId ? (
+                    <p className="text-[#858585] font-sans">Waiting for a project to load…</p>
+                  ) : outputLoading && outputLogs.length === 0 ? (
+                    <p className="text-[#858585] font-sans">Loading output…</p>
+                  ) : outputError ? (
+                    <p className="text-[#F48771] font-sans">{outputError}</p>
+                  ) : !outputRunId ? (
+                    <p className="text-[#858585] font-sans">
+                      No analysis run yet for this project — output appears here once you run the pipeline from the Dashboard tab.
+                    </p>
+                  ) : outputLogs.length === 0 ? (
+                    <p className="text-[#858585] font-sans">No output yet for this run.</p>
+                  ) : (
+                    <div className="flex-1 overflow-y-auto space-y-0.5 pb-1">
+                      <div className="text-[#6A6A6A] font-sans mb-1">
+                        run-{outputRunId.slice(0, 8)} · {outputLogs.length} line{outputLogs.length === 1 ? '' : 's'}
+                        {(outputRunStatus === 'RUNNING' || outputRunStatus === 'AWAITING_REVIEW') && (
+                          <span className="ml-2 text-indigo-400">● live</span>
+                        )}
+                      </div>
+                      {outputLogs.map(log => {
+                        const levelColor =
+                          log.level === 'ERROR' ? 'text-[#F48771]' :
+                          log.level === 'WARN' ? 'text-[#CCA700]' :
+                          log.level === 'PASS' ? 'text-[#4EC9B0]' :
+                          'text-[#9CDCFE]';
+                        return (
+                          <div key={log.id} className="text-[#CCCCCC] whitespace-pre-wrap">
+                            <span className="text-[#6A6A6A]">[{new Date(log.timestamp).toISOString().replace('T', ' ').replace('Z', '')}]</span>{' '}
+                            <span className={levelColor}>[{log.level}]</span>{' '}
+                            <span className="text-[#858585]">[{log.category}]</span>{' '}
+                            {log.message}
+                          </div>
+                        );
+                      })}
+                      <div ref={outputEndRef} />
+                    </div>
+                  )}
+                </div>
               )}
 
               {bottomTab === 'debug_console' && (
                 <p className="text-[#858585]">
-                  There's no debugger wired up here yet — this is a placeholder to match the IDE layout. Not built yet.
+                  This app has no debugger to attach to — there's no breakpoint/step-through engine anywhere in the
+                  codebase. This tab is an intentional placeholder to match the IDE layout, not a wiring gap.
                 </p>
               )}
 
@@ -1540,6 +1646,7 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
                     {terminalHistory.map((entry, idx) => (
                       <div key={idx}>
                         <div className="flex items-center gap-1.5 text-[#4EC9B0]">
+                          <span className="text-[#6A6A6A]">{`/workspace${entry.cwd ? '/' + entry.cwd : ''}`}</span>
                           <span>$</span>
                           <span>{entry.command}</span>
                         </div>
@@ -1553,6 +1660,7 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
                     <div ref={terminalEndRef} />
                   </div>
                   <div className="flex items-center gap-1.5 border-t border-[#2D2D2D] pt-1.5 shrink-0">
+                    <span className="text-[#6A6A6A]">{`/workspace${terminalCwd ? '/' + terminalCwd : ''}`}</span>
                     <span className="text-[#4EC9B0]">$</span>
                     <input
                       value={terminalInput}
