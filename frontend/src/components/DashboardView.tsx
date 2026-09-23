@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import React, { useEffect, useRef, useState } from 'react';
 import { apiRequest, getRealtimeSocketUrl, uploadProjectArchive } from '../api/client';
+import { getCheckpoint, postCheckpointFileEdit, postCheckpointPrompt, resumeCheckpoint } from '../api/analysis';
 import { uploadContextDoc, deleteContextDocApi } from '../api/contextDocs';
 import { getGithubTokenStatus, parseGithubUrl } from '../api/github';
 import { pipelinePhases as initialPipelinePhases, initialFixAttempts, initialPreviewCheckpoint } from '../data/mockData';
@@ -130,28 +131,41 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ refreshToken, onAn
     setShowEmbeddedPreview(true);
   };
 
-  // --- Pipeline v2 checkpoint handlers (local-state demo, see note above) ---
+  // --- Pipeline v2 checkpoint handlers — wired to the real backend
+  // endpoints (GET/POST /analysis/{id}/checkpoint/*). "Open preview" stays
+  // a local UI-only choice (there's no dedicated start-preview endpoint —
+  // the backend only flips to 'previewing' once a prompt or file edit is
+  // actually posted); "skip"/"continue" both really resume the paused
+  // Celery task via resumeCheckpoint(). onTriggerManualLoop has no backend
+  // endpoint yet (see append_checkpoint_file_edit's docstring) and stays
+  // local-only until that's built.
   const handleCheckpointDecision = (openPreview: boolean) => {
-    setCheckpoint((prev) => ({ ...prev, status: openPreview ? 'previewing' : 'resumed' }));
     if (openPreview) {
+      setCheckpoint((prev) => ({ ...prev, status: 'previewing' }));
       handleOpenPreview();
-    } else {
-      setShowCheckpointModal(false);
+      return;
     }
+    if (!analysisId) return;
+    resumeCheckpoint(analysisId)
+      .then(() => {
+        setShowCheckpointModal(false);
+        setCurrentExecutingPhase('Regression Check');
+      })
+      .catch((err) => setPipelineError(err?.message ?? 'Failed to resume the paused analysis'));
   };
 
   const handleCheckpointSubmitPrompt = (text: string) => {
-    setCheckpoint((prev) => ({
-      ...prev,
-      promptMessages: [
-        ...prev.promptMessages,
-        { id: `msg-${Date.now()}`, role: 'user', text, createdAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) },
-      ],
-    }));
+    if (!analysisId) return;
+    postCheckpointPrompt(analysisId, text)
+      .then((real) => setCheckpoint(real))
+      .catch((err) => setPipelineError(err?.message ?? 'Failed to send checkpoint prompt'));
   };
 
   const handleCheckpointSaveFileEdit = (edit: PreviewCheckpointFileEdit) => {
-    setCheckpoint((prev) => ({ ...prev, fileEditsDetected: [...prev.fileEditsDetected, edit] }));
+    if (!analysisId) return;
+    postCheckpointFileEdit(analysisId, edit)
+      .then((real) => setCheckpoint(real))
+      .catch((err) => setPipelineError(err?.message ?? 'Failed to record file edit'));
   };
 
   const handleCheckpointTriggerManualLoop = () => {
@@ -180,9 +194,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ refreshToken, onAn
   };
 
   const handleCheckpointGoNext = () => {
-    setShowCheckpointModal(false);
-    // NOTE: once the backend exists, this calls POST /analysis/{runId}/checkpoint/go-next
-    // to resume the paused Celery task into Phase 9 (Regression Check).
+    if (!analysisId) return;
+    resumeCheckpoint(analysisId)
+      .then(() => {
+        setShowCheckpointModal(false);
+        setCurrentExecutingPhase('Regression Check');
+      })
+      .catch((err) => setPipelineError(err?.message ?? 'Failed to resume the paused analysis'));
   };
 
   const refreshRecentRuns = React.useCallback(() => {
@@ -349,11 +367,17 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ refreshToken, onAn
         refreshRecentRuns();
         socket.close();
       } else if (data.type === 'analysis.awaiting_review') {
-        // Phase 8 Preview Checkpoint reached — pause/resume UI isn't wired
-        // to the real checkpoint endpoints yet (separate piece of work), so
-        // for now this just keeps the run visibly "running" rather than
-        // silently stalling.
+        // Phase 8 Preview Checkpoint reached — pull the real checkpoint row
+        // and open the modal for real. The run stays "running" (not
+        // finished): resumeCheckpoint() picks it back up into Phase 9 once
+        // the user acts, and this same socket keeps listening for that.
         setCurrentExecutingPhase('Preview Checkpoint (awaiting review)');
+        getCheckpoint(aid)
+          .then((real) => {
+            setCheckpoint(real);
+            setShowCheckpointModal(true);
+          })
+          .catch((err) => setPipelineError(err?.message ?? 'Failed to load the preview checkpoint'));
       } else if (data.type === 'analysis.failed') {
         const payload = data.payload as { message?: string };
         setIsAnalyzing(false);
@@ -887,9 +911,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ refreshToken, onAn
                       type="button"
                       onClick={() => setShowCheckpointModal(true)}
                       className="px-2.5 py-1 rounded bg-indigo-950/40 hover:bg-indigo-950/60 border border-indigo-500/30 text-[11px] font-mono text-indigo-300 flex items-center gap-1.5 cursor-pointer transition-colors"
-                      title="Opens the Phase 8 Preview Checkpoint UI on demand — the real trigger (automatic, right after Phase 8 finishes) needs the backend loop controller from PIPELINE_V2_ARCHITECTURE.md §4"
+                      title="Opens the Phase 8 Preview Checkpoint UI manually — it also opens automatically as soon as the backend pauses a run after Phase 8 passes"
                     >
-                      <span>⏸ Preview Checkpoint (Demo)</span>
+                      <span>⏸ Preview Checkpoint</span>
                     </button>
                   </div>
                 </div>

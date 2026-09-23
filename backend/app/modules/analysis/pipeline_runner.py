@@ -299,6 +299,60 @@ async def _collect_run_errors(
     return errors, logged_bugs
 
 
+async def _report_phase8_errors_to_phase4(
+    db: AsyncSession,
+    gateway: RealtimeGateway,
+    analysis_id: str,
+    project_id: str,
+    phase4: PipelinePhase | None,
+) -> None:
+    """Error finder (Phase 8 -> Phase 4): Phase 4 runs before Phase 8 in
+    pipeline order, so its evidence set is normally frozen at Phase 3's
+    static findings (see the STATIC-ONLY docstring on _collect_run_errors).
+    This re-runs that same collector now that Phase 8 has actually executed,
+    so Phase 4's evidence set and UI/log reflect every build/runtime/test
+    error Phase 8 found -- not just static analysis.
+
+    Merge only, by design (Job: error finder, option 1): this does NOT
+    change what Phase 5 / the retry loop diagnose from -- that still reads
+    its own direct feed unchanged. This just makes Phase 4 honestly show
+    the full picture after the fact.
+    """
+    if phase4 is None:
+        return
+
+    errors, logged_bugs = await _collect_run_errors(db, analysis_id, project_id)
+    phase8_sourced = [e for e in errors if e.source in ("build", "runtime", "test")]
+
+    steps = list(phase4.subprocesses or [])
+    steps.append({
+        "id": "phase8_errors_merged",
+        "name": "Merge Phase 8 build/runtime/test errors",
+        "completed": True,
+        "status": "completed",
+        "category": "errors",
+        "metrics": {
+            "phase8Errors": str(len(phase8_sourced)),
+            "totalEvidence": str(len(errors) + len(logged_bugs)),
+        },
+    })
+    await set_subprocesses(db, gateway, analysis_id, project_id, phase4, steps)
+
+    if phase8_sourced:
+        await add_log(
+            db, gateway, analysis_id, project_id, "INFO", "Error & Evidence Collection",
+            f"Phase 8 reported {len(phase8_sourced)} error(s) (build/runtime/test) — "
+            f"evidence set now totals {len(errors)} error(s) + {len(logged_bugs)} logged bug(s)",
+            phase4.id, phase4.number,
+        )
+    else:
+        await add_log(
+            db, gateway, analysis_id, project_id, "PASS", "Error & Evidence Collection",
+            "Phase 8 completed clean — no build/runtime/test errors to merge",
+            phase4.id, phase4.number,
+        )
+
+
 async def _bugs_in_scope_for_run(db: AsyncSession, project_id: str, analysis_id: str) -> list[Bug]:
     """Shared bug-selection query for Phase 5/6: bugs this run's Phase 3
     static analysis found (analysisRunId == this run) plus any still-open
@@ -854,10 +908,12 @@ async def run_analysis_pipeline(
                     error = await record_error(
                         db, project_id, f"Build command failed: {build_command}",
                         analysis_run_id=analysis_id, name="BuildError", stack_trace=detail,
+                        source="build",
                     )
                     await create_bug_from_error(db, project, error)
                     await add_log(db, gateway, analysis_id, project_id, "ERROR", "Install & Build",
                                   f"Build failed: {detail[:4000]}", phase.id, phase.number)
+                    await _report_phase8_errors_to_phase4(db, gateway, analysis_id, project_id, phases.get(4))
                     raise PipelineError(f"Build failed: {detail[:2000]}")
                 await add_log(db, gateway, analysis_id, project_id, "PASS", "Install & Build",
                               f"Build succeeded with {build_command}", phase.id, phase.number)
@@ -914,11 +970,20 @@ async def run_analysis_pipeline(
                     error = await record_error(
                         db, project_id, f"Test command failed: {test_command}",
                         analysis_run_id=analysis_id, name="TestFailure", stack_trace=detail,
+                        source="test",
                     )
                     await create_bug_from_error(db, project, error)
                     await add_log(db, gateway, analysis_id, project_id, "ERROR", "Testing",
                                   f"Tests failed: {detail[:4000]}", phase.id, phase.number)
+                    await _report_phase8_errors_to_phase4(db, gateway, analysis_id, project_id, phases.get(4))
                     raise PipelineError(f"Tests failed: {detail[:2000]}")
+
+                # Error finder (Phase 8 -> Phase 4): clean-pass tail. Build
+                # and tests both succeeded, but Phase 8's app-start check
+                # (_check_application_starts, above) may still have recorded
+                # an AppStartError/AppRuntimeError without raising -- so this
+                # always re-syncs Phase 4, even on an otherwise-passing run.
+                await _report_phase8_errors_to_phase4(db, gateway, analysis_id, project_id, phases.get(4))
 
                 # Phase 8's TODO is resolved below, right after the shared
                 # phase-completed tail block -- the checkpoint needs
