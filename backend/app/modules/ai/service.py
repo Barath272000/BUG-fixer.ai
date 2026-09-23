@@ -6,6 +6,7 @@ or the server-wide env-configured key/base URL as a fallback, exactly
 like the Node version's `credentials()` helper.
 """
 import json
+from typing import Awaitable, Callable
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -119,12 +120,30 @@ async def diagnose_root_cause(
     bug_id: str,
     provider: str | None = None,
     model: str | None = None,
+    on_understand: Callable[[], Awaitable[None]] | None = None,
+    on_trace: Callable[[], Awaitable[None]] | None = None,
+    on_root_cause: Callable[[], Awaitable[None]] | None = None,
+    on_impact: Callable[[], Awaitable[None]] | None = None,
 ) -> dict:
     """Phase 5: AI Root Cause Analysis. First of two real, separate AI
-    calls (Job 4) -- diagnosis only, no patch. See build_root_cause_prompt."""
+    calls (Job 4) -- diagnosis only, no patch. See build_root_cause_prompt.
+
+    The four on_* callbacks are optional hooks fired at the real moment
+    each of Phase 5's four steps (Understand error / Trace relevant code /
+    Determine root cause / Determine impact) actually finishes for this
+    bug, so a caller (the pipeline runner) can report live per-step
+    progress instead of one opaque call."""
     resolved = await resolve_model(db, provider, model, user_id)
     creds = await _credentials(db, user_id, resolved.provider)
-    context = await build_ai_context(db, project_id, bug_id=bug_id)
+    # NOTE: user_id is now forwarded -- previously omitted here, which
+    # silently skipped _gather_live_workspace_context entirely (it only
+    # runs `if user_id:`), meaning the automated pipeline's diagnosis never
+    # actually read live IDE source, even though the manual copilot-chat
+    # path did. Trace relevant code is only real once this is passed.
+    context = await build_ai_context(
+        db, project_id, user_id=user_id, bug_id=bug_id,
+        on_understand=on_understand, on_trace=on_trace,
+    )
 
     chat_request = ChatRequest(
         model=resolved.model,
@@ -145,14 +164,22 @@ async def diagnose_root_cause(
 
     result = _parse_json(chat_result.text)
 
+    root_cause = str(result.get("rootCause", ""))
+    if on_root_cause:
+        await on_root_cause()
+
+    blast_radius = str(result.get("blastRadius", ""))
+    if on_impact:
+        await on_impact()
+
     return {
         "provider": resolved.provider,
         "model": resolved.model,
-        "rootCause": str(result.get("rootCause", "")),
+        "rootCause": root_cause,
         "explanation": str(result.get("explanation", "")),
         "confidence": clamp_confidence(float(result.get("confidence", 0) or 0)),
         "affectedFiles": [str(f) for f in (result.get("affectedFiles") or [])],
-        "blastRadius": str(result.get("blastRadius", "")),
+        "blastRadius": blast_radius,
     }
 
 

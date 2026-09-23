@@ -12,6 +12,7 @@ shape was removed — `workspaceFiles` is a new, additive key.
 """
 import json
 import os
+from typing import Awaitable, Callable
 
 import aiofiles
 from sqlalchemy import select
@@ -99,7 +100,15 @@ async def build_ai_context(
     file_path: str | None = None,
     line_number: int | None = None,
     question: str | None = None,
+    on_understand: Callable[[], Awaitable[None]] | None = None,
+    on_trace: Callable[[], Awaitable[None]] | None = None,
 ) -> str:
+    """`on_understand` fires the moment the bug's own reported fields
+    (title/description/severity/stackTrace/filePath/lineNumber) are loaded --
+    the "Understand error" step. `on_trace` fires once the real IDE
+    workspace has been read (or definitively has nothing to read) --
+    the "Trace relevant code" step. Both are optional so every other
+    caller (copilot chat, etc.) is unaffected."""
     stmt = (
         select(Project)
         .where(Project.id == project_id)
@@ -123,6 +132,13 @@ async def build_ai_context(
             .limit(1)
         )
         bug = (await db.execute(bug_stmt)).scalar_one_or_none()
+
+    if on_understand:
+        # The bug's own reported facts (title, description, severity,
+        # stackTrace, filePath, lineNumber) are now loaded from the DB --
+        # this is the real "Understand error" step, done before any code
+        # is touched.
+        await on_understand()
 
     source = ""
     if project.workspacePath and file_path:
@@ -151,6 +167,11 @@ async def build_ai_context(
                 if entry["path"] == file_path:
                     source = entry["content"]
                     break
+
+    if on_trace:
+        # Real workspace source (or a confirmed "nothing to read" for this
+        # project) has now been gathered -- the "Trace relevant code" step.
+        await on_trace()
 
     context_docs = []
     for doc in project.contextDocuments:

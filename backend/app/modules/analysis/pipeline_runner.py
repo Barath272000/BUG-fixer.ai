@@ -368,18 +368,52 @@ async def _bugs_in_scope_for_run(db: AsyncSession, project_id: str, analysis_id:
 
 async def _diagnose_run_bugs(
     db: AsyncSession,
+    gateway: RealtimeGateway,
     project: Project,
     analysis_id: str,
+    phase: PipelinePhase,
+    subprocesses: list[dict],
 ) -> dict[str, dict]:
     """Phase 5: AI Root Cause Analysis. Job 4's first of two real, separate
     AI calls -- diagnosis only, no patch yet. Returns {bug_id: diagnosis}
     so Phase 6 can read each bug's settled diagnosis back out of the same
     run_analysis_pipeline() call (both phases execute in one function, one
-    loop, so this dict just lives as a local variable between them)."""
+    loop, so this dict just lives as a local variable between them).
+
+    Drives the phase's 4 visible sub-process steps (understand_error /
+    trace_relevant_code / determine_root_cause / determine_impact) off the
+    real per-bug checkpoints diagnose_root_cause fires -- each step ticks
+    to "running" with a live N/total count as bugs pass that checkpoint,
+    and flips to "completed" once every bug in scope has."""
     bugs = await _bugs_in_scope_for_run(db, project.id, analysis_id)
+    total = len(bugs)
+    step_ids = ("understand_error", "trace_relevant_code", "determine_root_cause", "determine_impact")
+
+    if total == 0:
+        for step_id in step_ids:
+            await _update_phase_step(db, gateway, analysis_id, project.id, phase, subprocesses, step_id,
+                                      "completed", {"bugs": "0/0"})
+        return {}
+
+    counts = {step_id: 0 for step_id in step_ids}
+
+    def _ticker(step_id: str):
+        async def _tick() -> None:
+            counts[step_id] += 1
+            status = "completed" if counts[step_id] >= total else "running"
+            await _update_phase_step(db, gateway, analysis_id, project.id, phase, subprocesses, step_id, status,
+                                      {"bugs": f"{counts[step_id]}/{total}"})
+        return _tick
+
     diagnoses: dict[str, dict] = {}
     for bug in bugs:
-        diagnoses[bug.id] = await diagnose_root_cause(db, project.ownerId, project.id, bug.id, None, None)
+        diagnoses[bug.id] = await diagnose_root_cause(
+            db, project.ownerId, project.id, bug.id, None, None,
+            on_understand=_ticker("understand_error"),
+            on_trace=_ticker("trace_relevant_code"),
+            on_root_cause=_ticker("determine_root_cause"),
+            on_impact=_ticker("determine_impact"),
+        )
     return diagnoses
 
 
@@ -811,18 +845,19 @@ async def run_analysis_pipeline(
 
             # Phase 5: AI Root Cause Analysis — REAL (Job 4). First of two
             # separate AI calls: diagnosis only, no patch (_diagnose_run_bugs
-            # -> diagnose_root_cause). Moved from old #7 -> #5.
+            # -> diagnose_root_cause). Moved from old #7 -> #5. Broken into
+            # its 4 real sub-steps (understand the error, trace the relevant
+            # code, determine root cause, determine impact) -- see
+            # _diagnose_run_bugs for how each ticks live per bug.
             if definition["number"] == 5:
                 subprocesses = _phase_steps([
-                    ("build_ai_context", "Build source-aware bug context", "ai"),
-                    ("generate_diagnoses", "Generate AI root-cause diagnoses", "ai"),
+                    ("understand_error", "Understand error", "ai"),
+                    ("trace_relevant_code", "Trace relevant code", "ai"),
+                    ("determine_root_cause", "Determine root cause", "ai"),
+                    ("determine_impact", "Determine impact", "ai"),
                 ])
                 await set_subprocesses(db, gateway, analysis_id, project_id, phase, subprocesses)
-                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "build_ai_context", "running")
-                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "build_ai_context", "completed")
-                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "generate_diagnoses", "running")
-                run_diagnoses = await _diagnose_run_bugs(db, project, analysis_id)
-                await _update_phase_step(db, gateway, analysis_id, project_id, phase, subprocesses, "generate_diagnoses", "completed", {"diagnoses": str(len(run_diagnoses))})
+                run_diagnoses = await _diagnose_run_bugs(db, gateway, project, analysis_id, phase, subprocesses)
                 await add_log(db, gateway, analysis_id, project_id, "PASS", "AI Root Cause Analysis",
                               f"Generated {len(run_diagnoses)} AI root-cause diagnosis(es)", phase.id, phase.number)
 
