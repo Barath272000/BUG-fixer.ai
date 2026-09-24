@@ -23,6 +23,15 @@ export interface NativeIdeCoreResponse {
   running: boolean;
 }
 
+export interface PipelineStartResponse {
+  id: string;
+  previewUrl: string;
+  containerPort: number;
+  hostPort: number;
+  snapshotRoot: string;
+  running: boolean;
+}
+
 export function fetchOrchestratorState(): Promise<OrchestratorState> {
   return apiRequest<OrchestratorState>('/orchestrator/state');
 }
@@ -46,6 +55,21 @@ export function startNativeIdeCore(
 
 export async function stopNativeIdeCore(): Promise<void> {
   await apiRequest<void>('/orchestrator/ide/stop', { method: 'POST' });
+}
+
+export function startPipelineStaging(
+  command: string,
+  language = 'python',
+  containerPort = 8000,
+): Promise<PipelineStartResponse> {
+  return apiRequest<PipelineStartResponse>('/orchestrator/pipeline/start', {
+    method: 'POST',
+    body: { command, language, containerPort },
+  });
+}
+
+export async function stopPipelineStaging(runId: string): Promise<void> {
+  await apiRequest<void>(`/orchestrator/pipeline/${encodeURIComponent(runId)}`, { method: 'DELETE' });
 }
 
 export function getOrchestratorStreamUrl(): string {

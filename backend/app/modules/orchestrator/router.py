@@ -1,6 +1,7 @@
 import asyncio
 
-from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
+import httpx
+from fastapi import APIRouter, Depends, Query, Request, Response, WebSocket, WebSocketDisconnect
 
 from app.common.middleware.auth import AuthUser, require_auth
 from app.core.config import settings
@@ -11,6 +12,8 @@ from app.modules.orchestrator.schemas import (
     FileResponse,
     NativeServerRequest,
     NativeServerResponse,
+    PipelineStartRequest,
+    PipelineStartResponse,
     OrchestratorState,
     ProcessOutput,
     ProcessRequest,
@@ -18,6 +21,7 @@ from app.modules.orchestrator.schemas import (
     SetStateRequest,
 )
 from app.modules.orchestrator.service import orchestrator
+from app.modules.orchestrator.pipeline import pipeline_manager
 
 router = APIRouter(prefix="/orchestrator", tags=["orchestrator"])
 
@@ -75,6 +79,78 @@ async def start_ide_core(payload: NativeServerRequest, _: AuthUser = Depends(req
 @router.post("/ide/stop", status_code=204)
 async def stop_ide_core(_: AuthUser = Depends(require_auth)) -> None:
     await orchestrator.stop_native_uvicorn()
+
+
+@router.post("/pipeline/start", response_model=PipelineStartResponse)
+async def start_pipeline(
+    payload: PipelineStartRequest,
+    request: Request,
+    _: AuthUser = Depends(require_auth),
+) -> PipelineStartResponse:
+    run = await pipeline_manager.start(payload.command, payload.language, payload.containerPort, payload.env)
+    base_url = settings.PIPELINE_PREVIEW_PUBLIC_URL.rstrip("/") or str(request.base_url).rstrip("/") + "/api/v1/orchestrator/previews"
+    preview_url = f"{base_url}/{run.id}"
+    await orchestrator.publish("pipeline.started", {"id": run.id, "previewUrl": preview_url})
+    return PipelineStartResponse(
+        id=run.id,
+        previewUrl=preview_url,
+        containerPort=run.container_port,
+        hostPort=run.host_port,
+        snapshotRoot=run.snapshot_root,
+        running=True,
+    )
+
+
+@router.delete("/pipeline/{run_id}", status_code=204)
+async def stop_pipeline(run_id: str, _: AuthUser = Depends(require_auth)) -> None:
+    await pipeline_manager.stop(run_id)
+    await orchestrator.publish("pipeline.stopped", {"id": run_id})
+
+
+async def _proxy_pipeline_preview(request: Request, run_id: str, path: str) -> Response:
+    target = pipeline_manager.target(run_id)
+    target_url = f"{target}/{path}" if path else target
+    if request.url.query:
+        target_url = f"{target_url}?{request.url.query}"
+    headers = {
+        key: value
+        for key, value in request.headers.items()
+        if key.lower() not in {"host", "content-length", "connection"}
+    }
+    try:
+        async with httpx.AsyncClient(follow_redirects=False, timeout=30.0) as client:
+            upstream = await client.request(request.method, target_url, content=await request.body(), headers=headers)
+    except httpx.HTTPError as exc:
+        return Response(content=f"Pipeline preview is unavailable: {exc}", status_code=502)
+    response_headers = {
+        key: value
+        for key, value in upstream.headers.items()
+        if key.lower() not in {"content-length", "connection", "transfer-encoding"}
+    }
+    return Response(
+        content=upstream.content,
+        status_code=upstream.status_code,
+        headers=response_headers,
+        media_type=upstream.headers.get("content-type"),
+    )
+
+
+@router.api_route(
+    "/previews/{run_id}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+    include_in_schema=False,
+)
+async def proxy_pipeline_preview_root(request: Request, run_id: str) -> Response:
+    return await _proxy_pipeline_preview(request, run_id, "")
+
+
+@router.api_route(
+    "/previews/{run_id}/{path:path}",
+    methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+    include_in_schema=False,
+)
+async def proxy_pipeline_preview_path(request: Request, run_id: str, path: str) -> Response:
+    return await _proxy_pipeline_preview(request, run_id, path)
 
 
 @router.get("/process/{process_id}", response_model=ProcessOutput)

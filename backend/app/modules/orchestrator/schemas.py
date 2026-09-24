@@ -68,6 +68,22 @@ class NativeServerResponse(BaseModel):
     running: bool
 
 
+class PipelineStartRequest(BaseModel):
+    command: str = Field(min_length=1)
+    language: str = "python"
+    containerPort: int = Field(default=8000, ge=1, le=65535)
+    env: dict[str, str] = Field(default_factory=dict)
+
+
+class PipelineStartResponse(BaseModel):
+    id: str
+    previewUrl: str
+    containerPort: int
+    hostPort: int
+    snapshotRoot: str
+    running: bool
+
+
 class OrchestratorEvent(BaseModel):
     type: str
     payload: dict[str, object]
