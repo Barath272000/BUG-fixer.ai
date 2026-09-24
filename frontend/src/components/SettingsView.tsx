@@ -148,12 +148,17 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ projectId, onHistory
         showToast(`Cleared ${cleared} recent file${cleared === 1 ? '' : 's'} from this browser and ${clearedRuns} analysis run${clearedRuns === 1 ? '' : 's'} (incl. their test results)`);
       } else if (actionType === 'bugs') {
         const deleted = await clearBugs(projectId);
+        setBugCount(0);
+        onHistoryChanged?.();
         showToast(`Cleared ${deleted} bug${deleted === 1 ? '' : 's'} (and their fix history)`);
       } else if (actionType === 'fixes') {
         const deleted = await clearFixHistory(projectId);
+        setFixCount(0);
+        onHistoryChanged?.();
         showToast(`Cleared ${deleted} AI fix record${deleted === 1 ? '' : 's'}`);
       } else if (actionType === 'tests') {
         const deleted = await clearAnalyticsTestRuns(projectId);
+        setTestRunCount(0);
         onAnalyticsCleared?.();
         showToast(`Cleared ${deleted} test run record${deleted === 1 ? '' : 's'}`);
       } else if (actionType === 'all') {
@@ -166,6 +171,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ projectId, onHistory
         setRecentFilesCount(0);
         setAnalysisRunCount(0);
         setBugCount(0);
+        setFixCount(0);
         setTestRunCount(0);
         onHistoryChanged?.();
         onAnalyticsCleared?.();

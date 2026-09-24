@@ -1,8 +1,10 @@
 import { ChevronDown } from 'lucide-react';
 import React, { useState } from 'react';
-import { createBugApi, fetchBugs, getOrCreateDefaultProject, updateBugStatusApi } from './api/bugs';
+import { apiRequest } from './api/client';
+import { createBugApi, fetchBugs, updateBugStatusApi } from './api/bugs';
+import { createProject } from './api/Project';
 import { fetchSettings } from './api/settings';
-import { downloadAnalysisFixes } from './api/fixes';
+import { downloadAnalysisFixes, fetchFixHistory } from './api/fixes';
 import { fetchProviderUsage } from './api/credentials';
 import { AIFixHistoryView } from './components/AIFixHistoryView';
 import { AnalyticsView } from './components/AnalyticsView';
@@ -21,6 +23,7 @@ import { AIFixHistoryItem, AppNotification, Bug, NavigationTab } from './types';
 export default function App() {
   const [activeTab, setActiveTab] = useState<NavigationTab>('workspace');
   const [bugs, setBugs] = useState<Bug[]>([]);
+  const [fixHistoryCount, setFixHistoryCount] = useState(0);
   const [projectId, setProjectId] = useState<string | null>(null);
   const [backendConnected, setBackendConnected] = useState(false);
   const [isLogBugOpen, setIsLogBugOpen] = useState(false);
@@ -33,7 +36,14 @@ export default function App() {
   const [activeModelBackend, setActiveModelBackend] = useState<{ provider: string; model: string } | null>(null);
   const [fixHistoryRefreshToken, setFixHistoryRefreshToken] = useState(0);
   const [dashboardRefreshToken, setDashboardRefreshToken] = useState(0);
+  const [recentFixes, setRecentFixes] = useState<AIFixHistoryItem[]>([]);
   const [isAnalyticsCleared, setIsAnalyticsCleared] = useState(false);
+  const [showProjectOnboarding, setShowProjectOnboarding] = useState(false);
+  const [onboardingName, setOnboardingName] = useState('');
+  const [onboardingSourceType, setOnboardingSourceType] = useState<'ZIP' | 'GITHUB' | 'PASTE'>('ZIP');
+  const [onboardingRepositoryUrl, setOnboardingRepositoryUrl] = useState('');
+  const [onboardingLoading, setOnboardingLoading] = useState(false);
+  const [onboardingError, setOnboardingError] = useState<string | null>(null);
   const quotaAlertsRef = React.useRef(new Set<string>());
 
   // --- Notifications (starts empty — populated from real events as they happen) ---
@@ -57,10 +67,11 @@ export default function App() {
   };
 
   const handleAnalysisCompleted = (analysisRunId: string, analyzedProjectName: string) => {
+    setActiveTab('bugs');
     setNotifications((prev) => [{
       id: `analysis-fixes-${analysisRunId}`,
       title: 'AI fixes are ready',
-      message: `All 8 analysis phases finished for ${analyzedProjectName || 'the project'}. Download the generated AI fix file?`,
+      message: `All 10 analysis phases finished for ${analyzedProjectName || 'the project'}. Download the generated AI fix file?`,
       timestamp: 'just now',
       read: false,
       type: 'fix',
@@ -92,16 +103,57 @@ export default function App() {
     setActiveTab('bugs');
   };
 
+  const handleProjectCreated = React.useCallback(async (createdProjectId: string) => {
+    setProjectId(createdProjectId);
+    setShowProjectOnboarding(false);
+    setOnboardingError(null);
+    try {
+      const realBugs = await fetchBugs(createdProjectId);
+      setBugs(realBugs);
+    } catch (err) {
+      console.error('Failed to load created project bugs:', err);
+    }
+  }, []);
+
+  const handleCreateProject = React.useCallback(async () => {
+    const trimmedName = onboardingName.trim();
+    if (!trimmedName) {
+      setOnboardingError('Choose a project name before continuing.');
+      return;
+    }
+
+    setOnboardingLoading(true);
+    setOnboardingError(null);
+
+    try {
+      const project = await createProject(trimmedName, onboardingSourceType, onboardingSourceType === 'GITHUB' && onboardingRepositoryUrl.trim()
+        ? { repositoryUrl: onboardingRepositoryUrl.trim(), defaultBranch: 'main' }
+        : undefined);
+      await handleProjectCreated(project.id);
+      setActiveTab('dashboard');
+    } catch (err) {
+      console.error('Failed to create onboarding project:', err);
+      setOnboardingError(err instanceof Error ? err.message : 'Could not create the project.');
+    } finally {
+      setOnboardingLoading(false);
+    }
+  }, [handleProjectCreated, onboardingName, onboardingRepositoryUrl, onboardingSourceType]);
+
   React.useEffect(() => {
     (async () => {
       try {
-        const [pid, settings] = await Promise.all([
-          getOrCreateDefaultProject(),
+        const [projectList, settings] = await Promise.all([
+          apiRequest<{ items?: Array<{ id: string }> }>('/projects'),
           fetchSettings(),
         ]);
-        setProjectId(pid);
-        const realBugs = await fetchBugs(pid);
-        setBugs(realBugs);
+        const existingProjectId = projectList.items && projectList.items.length > 0 ? projectList.items[0].id : null;
+        if (existingProjectId) {
+          setProjectId(existingProjectId);
+          const realBugs = await fetchBugs(existingProjectId);
+          setBugs(realBugs);
+        } else {
+          setShowProjectOnboarding(true);
+        }
         const savedModel = defaultModels.find(
           (model) => model.backend.provider === settings.primaryProvider && model.backend.model === settings.primaryModel,
         );
@@ -194,12 +246,53 @@ export default function App() {
   const handleAnalysisDataChanged = async (analyzedProjectId: string) => {
     setProjectId(analyzedProjectId);
     try {
-      setBugs(await fetchBugs(analyzedProjectId));
+      const nextBugs = await fetchBugs(analyzedProjectId);
+      const nextHistory = await fetchFixHistory();
+      setBugs(nextBugs);
+      setRecentFixes(nextHistory.slice(0, 3));
+      setFixHistoryCount(nextHistory.length);
       setFixHistoryRefreshToken((token) => token + 1);
+      setDashboardRefreshToken((token) => token + 1);
+      setActiveTab('bugs');
     } catch (err) {
       console.error('Failed to refresh analyzed project data:', err);
     }
   };
+
+  const handleHistoryChanged = React.useCallback(() => {
+    setBugs([]);
+    setRecentFixes([]);
+    setFixHistoryCount(0);
+    setFixHistoryRefreshToken((token) => token + 1);
+    setDashboardRefreshToken((token) => token + 1);
+  }, []);
+
+  React.useEffect(() => {
+    if (!projectId) {
+      setRecentFixes([]);
+      setFixHistoryCount(0);
+      return;
+    }
+
+    let cancelled = false;
+    fetchFixHistory()
+      .then((items) => {
+        if (!cancelled) {
+          setRecentFixes(items.slice(0, 3));
+          setFixHistoryCount(items.length);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setRecentFixes([]);
+          setFixHistoryCount(0);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, fixHistoryRefreshToken]);
 
   return (
     <div className="flex flex-col h-screen w-screen bg-[#0B0E14] text-[#E2E8F0] font-sans overflow-hidden select-none">
@@ -276,6 +369,81 @@ export default function App() {
       </header>
 
       {/* Main App Body with Sidebar & Content */}
+      {showProjectOnboarding && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-xl rounded-2xl border border-[#30363D] bg-[#0D1117] p-6 shadow-2xl">
+            <div className="mb-5">
+              <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-indigo-300">Project setup</div>
+              <h2 className="mt-2 text-2xl font-bold text-white">Start with a real project</h2>
+              <p className="mt-2 text-sm text-gray-400">
+                Create your first project before running the pipeline so analysis, fixes, and workspace state are tied to the actual repository you want to inspect.
+              </p>
+            </div>
+
+            <div className="space-y-4">
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-gray-300">Project name</label>
+                <input
+                  value={onboardingName}
+                  onChange={(e) => setOnboardingName(e.target.value)}
+                  placeholder="My API service"
+                  className="w-full rounded-lg border border-[#30363D] bg-[#161B22] px-3 py-2 text-sm text-white outline-none ring-0 placeholder:text-gray-500 focus:border-indigo-500"
+                />
+              </div>
+
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-gray-300">Source type</label>
+                <select
+                  value={onboardingSourceType}
+                  onChange={(e) => setOnboardingSourceType(e.target.value as 'ZIP' | 'GITHUB' | 'PASTE')}
+                  className="w-full rounded-lg border border-[#30363D] bg-[#161B22] px-3 py-2 text-sm text-white outline-none focus:border-indigo-500"
+                >
+                  <option value="ZIP">Archive upload</option>
+                  <option value="GITHUB">GitHub repository</option>
+                  <option value="PASTE">Paste or local snapshot</option>
+                </select>
+              </div>
+
+              {onboardingSourceType === 'GITHUB' && (
+                <div>
+                  <label className="mb-1.5 block text-xs font-medium text-gray-300">Repository URL</label>
+                  <input
+                    value={onboardingRepositoryUrl}
+                    onChange={(e) => setOnboardingRepositoryUrl(e.target.value)}
+                    placeholder="https://github.com/owner/repo"
+                    className="w-full rounded-lg border border-[#30363D] bg-[#161B22] px-3 py-2 text-sm text-white outline-none placeholder:text-gray-500 focus:border-indigo-500"
+                  />
+                </div>
+              )}
+
+              {onboardingError && (
+                <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+                  {onboardingError}
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowProjectOnboarding(false)}
+                  className="rounded-lg border border-[#30363D] px-4 py-2 text-sm text-gray-300 hover:bg-[#161B22]"
+                >
+                  Skip for now
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleCreateProject()}
+                  disabled={onboardingLoading}
+                  className="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-500 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {onboardingLoading ? 'Creating…' : 'Create project'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="flex flex-1 overflow-hidden">
         
         {/* Sidebar */}
@@ -285,6 +453,9 @@ export default function App() {
           collapsed={sidebarCollapsed}
           setCollapsed={setSidebarCollapsed}
           openLogBugModal={() => setIsLogBugOpen(true)}
+          bugCount={bugs.length}
+          fixHistoryCount={fixHistoryCount}
+          recentFixes={recentFixes}
         />
 
         {/* Dynamic Center View */}
@@ -326,6 +497,8 @@ export default function App() {
 
             {activeTab === 'analytics' && (
               <AnalyticsView
+                projectId={projectId}
+                refreshToken={dashboardRefreshToken}
                 isCleared={isAnalyticsCleared}
                 onResetAnalytics={() => setIsAnalyticsCleared(false)}
               />
@@ -336,7 +509,7 @@ export default function App() {
           {activeTab === 'settings' && (
             <SettingsView
               projectId={projectId}
-              onHistoryChanged={() => setDashboardRefreshToken((value) => value + 1)}
+              onHistoryChanged={handleHistoryChanged}
               onAnalyticsCleared={() => setIsAnalyticsCleared(true)}
             />
           )}

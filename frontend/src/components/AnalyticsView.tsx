@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { 
   BarChart3, 
   Clock, 
@@ -30,6 +30,7 @@ import {
   BarChart,
   Bar
 } from 'recharts';
+import { AnalyticsResponse, fetchAnalytics } from '../api/analytics';
 
 export interface ModelTokenMetric {
   id: string;
@@ -173,11 +174,15 @@ const categoryDistribution = [
 export interface AnalyticsViewProps {
   isCleared?: boolean;
   onResetAnalytics?: () => void;
+  projectId?: string | null;
+  refreshToken?: number;
 }
 
 export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
   isCleared = false,
-  onResetAnalytics
+  onResetAnalytics,
+  projectId,
+  refreshToken = 0,
 }) => {
   // Custom or configured model token limits state
   const [modelMetrics, setModelMetrics] = useState<ModelTokenMetric[]>(() => {
@@ -204,6 +209,28 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
   // Modal / Inline editor state for editing a model's token limit
   const [editingModel, setEditingModel] = useState<{ id: string; name: string; currentLimit: number } | null>(null);
   const [customLimitInput, setCustomLimitInput] = useState<string>('');
+
+  const [projectMetrics, setProjectMetrics] = useState<AnalyticsResponse | null>(null);
+
+  useEffect(() => {
+    if (!projectId) {
+      setProjectMetrics(null);
+      return;
+    }
+
+    let cancelled = false;
+    fetchAnalytics(projectId)
+      .then((data) => {
+        if (!cancelled) setProjectMetrics(data);
+      })
+      .catch(() => {
+        if (!cancelled) setProjectMetrics(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [projectId, refreshToken]);
 
   // Time range multiplier for demo simulation
   const timeMultiplier = timeRange === 'month' ? 1.0 : timeRange === 'week' ? 0.28 : 0.05;
@@ -248,6 +275,13 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
   }, [modelMetrics, providerFilter, modelSearchQuery]);
 
   // Aggregate totals
+  const effectiveMttrMinutes = isCleared ? 0 : (projectMetrics?.mttrMinutes ?? 48);
+  const effectiveAiRepairedBugs = isCleared ? 0 : (projectMetrics?.aiRepairedBugs ?? 92);
+  const effectiveTestPassRate = isCleared ? 0 : (projectMetrics?.testPassRate ?? 100);
+  const effectiveBugsDetected = isCleared ? 0 : (projectMetrics?.bugsDetected ?? 92);
+  const effectiveFixesGenerated = isCleared ? 0 : (projectMetrics?.fixesGenerated ?? 94);
+  const effectiveCost = isCleared ? 0 : (projectMetrics?.aiComputeCost ?? Number((modelMetrics.reduce((acc, m) => acc + (m.estCost * timeMultiplier), 0)).toFixed(2)));
+
   const totalTokensUsed = isCleared 
     ? 0 
     : Math.round(modelMetrics.reduce((acc, m) => acc + (m.tokensUsed * timeMultiplier), 0));
@@ -266,7 +300,7 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
 
   const totalCost = isCleared 
     ? 0 
-    : Number((modelMetrics.reduce((acc, m) => acc + (m.estCost * timeMultiplier), 0)).toFixed(2));
+    : effectiveCost;
 
   const overallQuotaPercentage = totalTokenLimit > 0 
     ? Number(((totalTokensUsed / totalTokenLimit) * 100).toFixed(1)) 
@@ -384,10 +418,10 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
           <div className="flex items-center justify-between text-cyan-400">
             <Clock className="w-4 h-4" />
             <span className={`text-[11px] font-bold ${!isCleared ? 'text-emerald-400' : 'text-slate-500'}`}>
-              {!isCleared ? '-89%' : '0%'}
+              {!isCleared ? `${Math.max(0, 100 - Math.min(99, Math.round(effectiveMttrMinutes / 3)))}%` : '0%'}
             </span>
           </div>
-          <div className="text-2xl font-bold text-white">{!isCleared ? '48 mins' : '0 mins'}</div>
+          <div className="text-2xl font-bold text-white">{!isCleared ? `${effectiveMttrMinutes} mins` : '0 mins'}</div>
           <div className="text-xs text-slate-400 font-medium">Mean Time to Repair (MTTR)</div>
         </div>
 
@@ -395,22 +429,22 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
           <div className="flex items-center justify-between text-purple-400">
             <Zap className="w-4 h-4" />
             <span className={`text-[11px] font-bold ${!isCleared ? 'text-purple-400' : 'text-slate-500'}`}>
-              {!isCleared ? '94.2%' : '0%'}
+              {!isCleared ? `${Math.min(100, Math.round((effectiveAiRepairedBugs / Math.max(1, effectiveBugsDetected || effectiveAiRepairedBugs || 1)) * 100))}%` : '0%'}
             </span>
           </div>
-          <div className="text-2xl font-bold text-white">{!isCleared ? '92 Bugs' : '0 Bugs'}</div>
-          <div className="text-xs text-slate-400 font-medium">Auto-Repaired by AI</div>
+          <div className="text-2xl font-bold text-white">{!isCleared ? `${effectiveBugsDetected} Bugs` : '0 Bugs'}</div>
+          <div className="text-xs text-slate-400 font-medium">{!isCleared ? `Detected • ${effectiveFixesGenerated} generated` : 'Bugs Detected'}</div>
         </div>
 
         <div className="rounded-2xl bg-[#131826] border border-[#1f283d] p-5 space-y-1">
           <div className="flex items-center justify-between text-emerald-400">
             <CheckCircle2 className="w-4 h-4" />
             <span className={`text-[11px] font-bold ${!isCleared ? 'text-emerald-400' : 'text-slate-500'}`}>
-              {!isCleared ? '0 regr.' : 'No data'}
+              {!isCleared ? `${effectiveTestPassRate}%` : 'No data'}
             </span>
           </div>
           <div className={`text-2xl font-bold ${!isCleared ? 'text-emerald-400' : 'text-slate-500'}`}>
-            {!isCleared ? '100%' : '0%'}
+            {!isCleared ? `${effectiveTestPassRate}%` : '0%'}
           </div>
           <div className="text-xs text-slate-400 font-medium">Docker Sandbox Test Pass Rate</div>
         </div>

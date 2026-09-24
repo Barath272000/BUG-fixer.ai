@@ -9,10 +9,9 @@ import {
   Settings, 
   ChevronLeft,
   Plus,
-  CheckCircle2,
-  Clock
+  CheckCircle2
 } from 'lucide-react';
-import { NavigationTab } from '../types';
+import { AIFixHistoryItem, NavigationTab } from '../types';
 
 interface SidebarProps {
   activeTab: NavigationTab;
@@ -21,6 +20,9 @@ interface SidebarProps {
   setCollapsed?: (val: boolean) => void;
   openLogBugModal?: () => void;
   openCriticalBugsModal?: () => void;
+  bugCount?: number;
+  fixHistoryCount?: number;
+  recentFixes?: AIFixHistoryItem[];
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -28,7 +30,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
   setActiveTab,
   collapsed = false,
   setCollapsed,
-  openLogBugModal
+  openLogBugModal,
+  bugCount = 0,
+  fixHistoryCount = 0,
+  recentFixes = [],
 }) => {
   // Auto-hide: expand when the mouse touches the left edge of the screen,
   // collapse again when the mouse leaves the sidebar itself.
@@ -106,9 +111,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <Bug className={`w-4 h-4 ${activeTab === 'bugs' ? 'text-indigo-400' : 'text-gray-400'}`} />
               {!collapsed && <span>Bug List</span>}
             </div>
-            {!collapsed && (
+            {!collapsed && activeTab !== 'bugs' && bugCount > 0 && (
               <span className="px-1.5 py-0.2 text-[10px] font-semibold rounded bg-red-500/20 text-red-400 border border-red-500/30">
-                7
+                {bugCount}
               </span>
             )}
           </button>
@@ -127,9 +132,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <History className={`w-4 h-4 ${activeTab === 'ai-fix-history' ? 'text-indigo-400' : 'text-gray-400'}`} />
               {!collapsed && <span>AI Fix History</span>}
             </div>
-            {!collapsed && (
+            {!collapsed && activeTab !== 'ai-fix-history' && fixHistoryCount > 0 && (
               <span className="px-1.5 py-0.2 text-[10px] font-semibold rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-                9
+                {fixHistoryCount}
               </span>
             )}
           </button>
@@ -184,29 +189,20 @@ export const Sidebar: React.FC<SidebarProps> = ({
               Recent Fixes
             </div>
             
-            <div 
-              onClick={() => setActiveTab('workspace')}
-              className="flex items-center px-4 py-2 bg-indigo-500/10 border-l-2 border-indigo-500 text-xs text-gray-200 cursor-pointer hover:bg-indigo-500/20 transition-colors"
-            >
-              <CheckCircle2 className="w-3.5 h-3.5 mr-2.5 text-indigo-400 shrink-0" />
-              <span className="truncate font-mono">auth_service.py</span>
-            </div>
-
-            <div 
-              onClick={() => setActiveTab('workspace')}
-              className="flex items-center px-4 py-2 hover:bg-[#161B22] text-xs text-gray-400 cursor-pointer transition-colors"
-            >
-              <CheckCircle2 className="w-3.5 h-3.5 mr-2.5 text-gray-500 shrink-0" />
-              <span className="truncate font-mono">database_utils.js</span>
-            </div>
-
-            <div 
-              onClick={() => setActiveTab('workspace')}
-              className="flex items-center px-4 py-2 hover:bg-[#161B22] text-xs text-gray-400 cursor-pointer transition-colors"
-            >
-              <Clock className="w-3.5 h-3.5 mr-2.5 text-amber-500 shrink-0" />
-              <span className="truncate font-mono">api_gateway.go</span>
-            </div>
+            {recentFixes.length === 0 ? (
+              <div className="px-4 py-2 text-xs text-gray-500">No recent fixes</div>
+            ) : (
+              recentFixes.map((fix) => (
+                <div
+                  key={fix.id}
+                  onClick={() => setActiveTab('ai-fix-history')}
+                  className="flex items-center px-4 py-2 hover:bg-[#161B22] text-xs text-gray-400 cursor-pointer transition-colors"
+                >
+                  <CheckCircle2 className="w-3.5 h-3.5 mr-2.5 text-indigo-400 shrink-0" />
+                  <span className="truncate font-mono">{fix.bugTitle || fix.patchSummary || 'Patch'}</span>
+                </div>
+              ))
+            )}
           </div>
         )}
 

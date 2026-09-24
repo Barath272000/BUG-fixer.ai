@@ -156,12 +156,16 @@ export interface IdeMenuBarProps {
   onSelectBottomTab?: (tab: string) => void;
   onRunActiveFile?: () => void;
   onStartDebugging?: () => void;
+  onRunBuildTask?: () => void;
+  onOpenTaskPicker?: () => void;
   onSaveFile?: () => void;
   onCloseFile?: () => void;
   onToggleDiff?: () => void;
   onOpenModelSelector?: () => void;
   onOpenCopilotSettings?: () => void;
   onOpenGoToFile?: () => void;
+  onOpenWorkspaceSymbols?: () => void;
+  onOpenEditorSymbols?: () => void;
   wordWrap?: boolean;
   onToggleWordWrap?: () => void;
   autoSave?: boolean;
@@ -181,12 +185,16 @@ export const IdeMenuBar: React.FC<IdeMenuBarProps> = ({
   onSelectBottomTab,
   onRunActiveFile,
   onStartDebugging,
+  onRunBuildTask,
+  onOpenTaskPicker,
   onSaveFile,
   onCloseFile,
   onToggleDiff,
   onOpenModelSelector,
   onOpenCopilotSettings,
   onOpenGoToFile,
+  onOpenWorkspaceSymbols,
+  onOpenEditorSymbols,
   wordWrap = false,
   onToggleWordWrap,
   autoSave = true,
@@ -430,10 +438,10 @@ export const IdeMenuBar: React.FC<IdeMenuBarProps> = ({
         },
         { id: 'sep_g2', label: '', separator: true },
         { id: 'go_to_file', label: 'Go to File...', shortcut: 'Ctrl+P', action: onOpenGoToFile },
-        { id: 'go_to_sym_ws', label: 'Go to Symbol in Workspace...', shortcut: 'Ctrl+T' },
+        { id: 'go_to_sym_ws', label: 'Go to Symbol in Workspace...', shortcut: 'Ctrl+T', action: onOpenWorkspaceSymbols },
         { id: 'sep_g3', label: '', separator: true },
-        { id: 'go_to_sym_ed', label: 'Go to Symbol in Editor...', shortcut: 'Ctrl+Shift+O' },
-        { id: 'go_to_def', label: 'Go to Definition', shortcut: 'F12' },
+        { id: 'go_to_sym_ed', label: 'Go to Symbol in Editor...', shortcut: 'Ctrl+Shift+O', action: onOpenEditorSymbols },
+        { id: 'go_to_def', label: 'Go to Definition', shortcut: 'F12', action: onOpenEditorSymbols },
         { id: 'go_to_decl', label: 'Go to Declaration' },
         { id: 'go_to_type_def', label: 'Go to Type Definition' },
         { id: 'go_to_impl', label: 'Go to Implementations', shortcut: 'Ctrl+F12' },
@@ -458,8 +466,8 @@ export const IdeMenuBar: React.FC<IdeMenuBarProps> = ({
         { id: 'stop_debugging', label: 'Stop Debugging', shortcut: 'Shift+F5' },
         { id: 'restart_debugging', label: 'Restart Debugging', shortcut: 'Ctrl+Shift+F5', action: onRunActiveFile },
         { id: 'sep_r1', label: '', separator: true },
-        { id: 'open_configs', label: 'Open Configurations' },
-        { id: 'add_config', label: 'Add Configuration...' },
+        { id: 'open_configs', label: 'Open Configurations', action: onOpenTaskPicker },
+        { id: 'add_config', label: 'Add Configuration...', action: onOpenTaskPicker },
         { id: 'sep_r2', label: '', separator: true },
         { id: 'step_over', label: 'Step Over', shortcut: 'F10' },
         { id: 'step_into', label: 'Step Into', shortcut: 'F11' },
@@ -492,8 +500,8 @@ export const IdeMenuBar: React.FC<IdeMenuBarProps> = ({
         { id: 'split_terminal', label: 'Split Terminal', shortcut: 'Ctrl+Shift+5' },
         { id: 'new_terminal_window', label: 'New Terminal Window', shortcut: 'Ctrl+Shift+Alt+`' },
         { id: 'sep_t1', label: '', separator: true },
-        { id: 'run_task', label: 'Run Task...' },
-        { id: 'run_build_task', label: 'Run Build Task...', shortcut: 'Ctrl+Shift+B', action: onRunActiveFile },
+        { id: 'run_task', label: 'Run Task...', action: onOpenTaskPicker },
+        { id: 'run_build_task', label: 'Run Build Task...', shortcut: 'Ctrl+Shift+B', action: onRunBuildTask ?? onOpenTaskPicker },
         { id: 'run_active_file', label: 'Run Active File', action: onRunActiveFile },
         { id: 'run_selected_text', label: 'Run Selected Text' },
         { id: 'sep_t2', label: '', separator: true },
@@ -501,8 +509,8 @@ export const IdeMenuBar: React.FC<IdeMenuBarProps> = ({
         { id: 'restart_running_task', label: 'Restart Running Task...' },
         { id: 'terminate_task', label: 'Terminate Task...' },
         { id: 'sep_t3', label: '', separator: true },
-        { id: 'configure_tasks', label: 'Configure Tasks...' },
-        { id: 'configure_default_build', label: 'Configure Default Build Task...' }
+        { id: 'configure_tasks', label: 'Configure Tasks...', action: onOpenTaskPicker },
+        { id: 'configure_default_build', label: 'Configure Default Build Task...', action: onRunBuildTask ?? onOpenTaskPicker }
       ]
     },
     {

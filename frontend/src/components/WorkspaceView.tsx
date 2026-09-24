@@ -61,11 +61,102 @@ interface WorkspaceViewProps {
 type ActivityView = 'explorer' | 'search' | 'git' | 'extensions' | 'none';
 type BottomTab = 'problems' | 'output' | 'terminal' | 'debug_console';
 
+type TaskRunStatus = 'success' | 'failed';
+
 interface OpenFile {
   path: string;
   content: string;
   savedContent: string;
 }
+
+interface WorkspaceTask {
+  id: string;
+  label: string;
+  command: string;
+  description: string;
+  category: 'frontend' | 'backend' | 'workspace';
+}
+
+interface WorkspaceExtension {
+  id: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+  tags: string[];
+  tasks: WorkspaceTask[];
+}
+
+const DEFAULT_WORKSPACE_EXTENSIONS: WorkspaceExtension[] = [
+  {
+    id: 'task-runner',
+    name: 'Task Runner',
+    description: 'Project commands for build, test, and workspace orchestration.',
+    enabled: true,
+    tags: ['tools', 'build'],
+    tasks: [
+      {
+        id: 'frontend-build',
+        label: 'Build frontend',
+        command: 'cd frontend && npm run build',
+        description: 'Compile the Vite production bundle.',
+        category: 'frontend',
+      },
+      {
+        id: 'backend-tests',
+        label: 'Run backend tests',
+        command: 'cd backend && pytest -q',
+        description: 'Execute the Python backend test suite.',
+        category: 'backend',
+      },
+      {
+        id: 'backend-stack',
+        label: 'Start backend stack',
+        command: 'cd backend && docker compose up -d',
+        description: 'Bring up the API and its supporting services.',
+        category: 'backend',
+      },
+    ],
+  },
+  {
+    id: 'build-tools',
+    name: 'Build Tools',
+    description: 'Compile and validate the active workspace with the right toolchain.',
+    enabled: true,
+    tags: ['validation', 'build'],
+    tasks: [
+      {
+        id: 'frontend-dev',
+        label: 'Run frontend dev server',
+        command: 'cd frontend && npm run dev -- --host 0.0.0.0',
+        description: 'Start the local UI dev server.',
+        category: 'frontend',
+      },
+      {
+        id: 'workspace-lint',
+        label: 'Workspace validation',
+        command: 'cd frontend && npm run build',
+        description: 'Perform a front-end validation pass for the active workspace state.',
+        category: 'workspace',
+      },
+    ],
+  },
+  {
+    id: 'debug-tools',
+    name: 'Debug Tools',
+    description: 'Runtime commands for the active file and debugger console.',
+    enabled: true,
+    tags: ['debug', 'runtime'],
+    tasks: [
+      {
+        id: 'active-file-run',
+        label: 'Run active file',
+        command: 'placeholder-run',
+        description: 'Executed dynamically for the current file type.',
+        category: 'workspace',
+      },
+    ],
+  },
+];
 
 function isDirty(file: OpenFile): boolean {
   return file.content !== file.savedContent;
@@ -135,7 +226,96 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
   projectId = null,
   bugs = [],
 }) => {
-  void initialSelectedBug; // TODO: wire this up to pre-select a file relevant to the bug
+  const buildBugFileCandidates = useCallback((rawPath?: string) => {
+    if (!rawPath) return [] as string[];
+
+    const normalized = rawPath.replace(/\\/g, '/').trim().replace(/^\/+/, '');
+    if (!normalized) return [] as string[];
+
+    const candidates = new Set<string>();
+    candidates.add(normalized);
+
+    const shortName = normalized.split('/').pop() ?? normalized;
+    if (shortName !== normalized) candidates.add(shortName);
+
+    if (!normalized.startsWith('backend/') && !normalized.startsWith('frontend/') && !normalized.startsWith('src/') && !normalized.startsWith('app/')) {
+      candidates.add(`backend/${normalized}`);
+      candidates.add(`frontend/${normalized}`);
+    }
+
+    return Array.from(candidates);
+  }, []);
+
+  useEffect(() => {
+    if (!initialSelectedBug || !projectId) return;
+
+    const targetPath = initialSelectedBug.filePath;
+    if (!targetPath) return;
+
+    let didCancel = false;
+
+    const openBugTarget = async () => {
+      const candidates = buildBugFileCandidates(targetPath);
+
+      for (const candidate of candidates) {
+        try {
+          const result = await fetchWorkspaceFile(projectId, candidate);
+          if (didCancel) return;
+
+          setActivityView('explorer');
+          setSelectedPath(candidate);
+          setOpenFiles(prev => {
+            if (prev.some(file => file.path === candidate)) {
+              return prev;
+            }
+            return [...prev, { path: candidate, content: result.content, savedContent: result.content }];
+          });
+          setActivePath(candidate);
+          addRecentFile(projectId, candidate);
+
+          const targetLine = initialSelectedBug.lineNumber ?? 1;
+          setTimeout(() => {
+            if (!didCancel && editorRef.current) {
+              editorRef.current.setPosition({ lineNumber: targetLine, column: 1 });
+              editorRef.current.revealLineInCenter(targetLine);
+              editorRef.current.focus();
+            }
+          }, 150);
+
+          return;
+        } catch {
+          // Keep trying the other likely locations for this bug file.
+        }
+      }
+
+      const fallbackName = targetPath.split('/').pop() ?? initialSelectedBug.title;
+      try {
+        const matches = await searchWorkspaceFiles(projectId, fallbackName);
+        if (didCancel || matches.length === 0) return;
+        const nextTarget = matches[0].file;
+        setActivityView('explorer');
+        setSelectedPath(nextTarget);
+        await openFile(nextTarget);
+
+        const targetLine = initialSelectedBug.lineNumber ?? matches[0].line ?? 1;
+        setTimeout(() => {
+          if (!didCancel && editorRef.current) {
+            editorRef.current.setPosition({ lineNumber: targetLine, column: 1 });
+            editorRef.current.revealLineInCenter(targetLine);
+            editorRef.current.focus();
+          }
+        }, 150);
+      } catch {
+        // Fall back silently when no file can be resolved.
+      }
+    };
+
+    void openBugTarget();
+
+    return () => {
+      didCancel = true;
+    };
+  }, [buildBugFileCandidates, initialSelectedBug, projectId]);
 
   // --- Activity bar / panel layout state ---
   const [activityView, setActivityView] = useState<ActivityView>('explorer');
@@ -193,6 +373,259 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
   const [searchResults, setSearchResults] = useState<WorkspaceSearchMatch[]>([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchError, setSearchError] = useState<string | null>(null);
+
+  interface WorkspaceDiagnostic {
+    id: string;
+    title: string;
+    severity: 'Critical' | 'High' | 'Medium' | 'Low';
+    status: 'Open';
+    filePath: string;
+    lineNumber: number;
+  }
+
+  interface WorkspaceSymbol {
+    id: string;
+    name: string;
+    file: string;
+    kind: 'function' | 'class' | 'variable' | 'method';
+    line: number;
+    preview: string;
+  }
+
+  const editorRef = useRef<any>(null);
+  const [workspaceDiagnostics, setWorkspaceDiagnostics] = useState<WorkspaceDiagnostic[]>([]);
+  const [workspaceSymbols, setWorkspaceSymbols] = useState<WorkspaceSymbol[]>([]);
+  const [symbolPickerOpen, setSymbolPickerOpen] = useState(false);
+  const [symbolQuery, setSymbolQuery] = useState('');
+  const [agentQuickPrompt, setAgentQuickPrompt] = useState<string | null>(null);
+
+  const [isGoToFileOpen, setIsGoToFileOpen] = useState(false);
+  const [goToFileQuery, setGoToFileQuery] = useState('');
+  const [taskPickerOpen, setTaskPickerOpen] = useState(false);
+  const [taskQuery, setTaskQuery] = useState('');
+  const [workspaceExtensions, setWorkspaceExtensions] = useState<WorkspaceExtension[]>(() => {
+    if (typeof window === 'undefined') return DEFAULT_WORKSPACE_EXTENSIONS;
+    try {
+      const raw = window.localStorage.getItem('bugfixer-workspace-extensions');
+      if (!raw) return DEFAULT_WORKSPACE_EXTENSIONS;
+      const parsed = JSON.parse(raw) as WorkspaceExtension[];
+      if (!Array.isArray(parsed) || parsed.length === 0) return DEFAULT_WORKSPACE_EXTENSIONS;
+      const merged = DEFAULT_WORKSPACE_EXTENSIONS.map(defaultExt => {
+        const found = parsed.find(ext => ext.id === defaultExt.id);
+        return found ? { ...defaultExt, ...found, tasks: found.tasks?.length ? found.tasks : defaultExt.tasks } : defaultExt;
+      });
+      return merged;
+    } catch {
+      return DEFAULT_WORKSPACE_EXTENSIONS;
+    }
+  });
+  const [taskHistory, setTaskHistory] = useState<Array<{
+    id: string;
+    taskId: string;
+    label: string;
+    command: string;
+    status: TaskRunStatus;
+    exitCode: number;
+    timestamp: string;
+  }>>(() => {
+    if (typeof window === 'undefined') return [];
+    try {
+      const raw = window.localStorage.getItem('bugfixer-task-history');
+      return raw ? JSON.parse(raw) as Array<{ id: string; taskId: string; label: string; command: string; status: TaskRunStatus; exitCode: number; timestamp: string; }> : [];
+    } catch {
+      return [];
+    }
+  });
+  const [lastTaskResult, setLastTaskResult] = useState<{ id: string; taskId: string; label: string; command: string; status: TaskRunStatus; exitCode: number; timestamp: string; } | null>(null);
+
+  const recordTaskResult = useCallback((nextResult: { id: string; taskId: string; label: string; command: string; status: TaskRunStatus; exitCode: number; timestamp: string; }) => {
+    setTaskHistory(prev => [nextResult, ...prev.filter(item => !(item.taskId === nextResult.taskId && item.label === nextResult.label && item.command === nextResult.command))].slice(0, 8));
+    setLastTaskResult(nextResult);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem('bugfixer-task-history', JSON.stringify(taskHistory.slice(0, 8)));
+      window.localStorage.setItem('bugfixer-workspace-extensions', JSON.stringify(workspaceExtensions));
+    }
+  }, [taskHistory, workspaceExtensions]);
+
+  const flatFiles = useMemo(() => {
+    const out: string[] = [];
+    const walkTree = (nodes: WorkspaceTreeNode[]) => {
+      for (const node of nodes) {
+        if (node.type === 'file') out.push(node.path);
+        else if (node.children) walkTree(node.children);
+      }
+    };
+    walkTree(tree);
+    return out;
+  }, [tree]);
+
+  const goToFileResults = useMemo(() => {
+    const q = goToFileQuery.trim().toLowerCase();
+    if (!q) return flatFiles.slice(0, 30);
+    return flatFiles.filter(f => f.toLowerCase().includes(q)).slice(0, 30);
+  }, [flatFiles, goToFileQuery]);
+
+  const workspaceTasks = useMemo<WorkspaceTask[]>(() => {
+    const enabledTasks = workspaceExtensions
+      .filter(ext => ext.enabled)
+      .flatMap(ext => ext.tasks);
+
+    const activePath = activeFile?.path ?? '';
+    if (!activePath) return enabledTasks;
+
+    const activeTasks = [...enabledTasks];
+    if (activePath.includes('/frontend/')) {
+      return activeTasks.filter(task => task.category !== 'backend' || task.id === 'backend-tests');
+    }
+    if (activePath.includes('/backend/')) {
+      return activeTasks.filter(task => task.category !== 'frontend' || task.id === 'frontend-build');
+    }
+    return activeTasks;
+  }, [activeFile, workspaceExtensions]);
+
+  const taskResults = useMemo(() => {
+    const q = taskQuery.trim().toLowerCase();
+    if (!q) return workspaceTasks;
+    return workspaceTasks.filter(task =>
+      task.label.toLowerCase().includes(q) ||
+      task.description.toLowerCase().includes(q) ||
+      task.command.toLowerCase().includes(q)
+    );
+  }, [taskQuery, workspaceTasks]);
+
+  const collectWorkspaceSymbolsForFile = useCallback((filePath: string, content: string): WorkspaceSymbol[] => {
+    const lines = content.split(/\r?\n/);
+    const entries: WorkspaceSymbol[] = [];
+
+    const pushSymbol = (match: RegExpMatchArray, kind: WorkspaceSymbol['kind']) => {
+      const name = match[1] ?? match[2] ?? match[0];
+      const line = lines.findIndex(line => line.includes(name));
+      const preview = lines[line] ?? '';
+      entries.push({
+        id: `${filePath}:${line + 1}:${name}`,
+        name,
+        file: filePath,
+        kind,
+        line: Math.max(1, line + 1),
+        preview,
+      });
+    };
+
+    lines.forEach((line, idx) => {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('//') || trimmed.startsWith('/*') || trimmed.startsWith('*')) return;
+
+      const functionMatch = trimmed.match(/^(?:export\s+)?(?:async\s+)?function\s+([A-Za-z0-9_]+)/);
+      const methodMatch = trimmed.match(/^(?:public|private|protected|static\s+)?(?:async\s+)?([A-Za-z0-9_]+)\s*\([^)]*\)\s*\{/);
+      const classMatch = trimmed.match(/^class\s+([A-Za-z0-9_]+)/);
+      const defMatch = trimmed.match(/^def\s+([A-Za-z0-9_]+)/);
+      const variableMatch = trimmed.match(/^(?:const|let|var|public|private|protected)\s+([A-Za-z0-9_]+)\s*[:=]/);
+
+      if (functionMatch) pushSymbol(functionMatch, 'function');
+      else if (methodMatch && !trimmed.startsWith('if ') && !trimmed.startsWith('for ') && !trimmed.startsWith('while ')) pushSymbol(methodMatch, 'method');
+      else if (classMatch) pushSymbol(classMatch, 'class');
+      else if (defMatch) pushSymbol(defMatch, 'function');
+      else if (variableMatch) pushSymbol(variableMatch, 'variable');
+      if (idx > 300) return;
+    });
+
+    return entries;
+  }, []);
+
+  const inspectOpenFilesForDiagnostics = useCallback(() => {
+    const diagnostics: WorkspaceDiagnostic[] = [];
+
+    openFiles.forEach(file => {
+      const lines = file.content.split(/\r?\n/);
+      lines.forEach((line, index) => {
+        const trimmed = line.trim();
+        if (!trimmed) return;
+        if (/TODO|FIXME|HACK/i.test(trimmed)) {
+          diagnostics.push({
+            id: `${file.path}:${index + 1}:todo`,
+            title: `Follow-up note: ${trimmed.slice(0, 60)}`,
+            severity: 'Low',
+            status: 'Open',
+            filePath: file.path,
+            lineNumber: index + 1,
+          });
+        }
+      });
+
+      if (file.path.endsWith('.py') && !file.content.trim()) {
+        diagnostics.push({
+          id: `${file.path}:empty`,
+          title: 'Empty file is ready for implementation.',
+          severity: 'Low',
+          status: 'Open',
+          filePath: file.path,
+          lineNumber: 1,
+        });
+      }
+    });
+
+    setWorkspaceDiagnostics(diagnostics.slice(0, 40));
+  }, [openFiles]);
+
+  const loadWorkspaceSymbols = useCallback(async () => {
+    if (!projectId) {
+      setWorkspaceSymbols([]);
+      return;
+    }
+
+    const symbolMap = new Map<string, WorkspaceSymbol>();
+    const filesForScan = flatFiles.slice(0, 40);
+
+    for (const filePath of filesForScan) {
+      try {
+        const result = await fetchWorkspaceFile(projectId, filePath);
+        const symbols = collectWorkspaceSymbolsForFile(filePath, result.content);
+        symbols.forEach(symbol => symbolMap.set(symbol.id, symbol));
+      } catch {
+        // Skip unreadable files in the workspace symbol index.
+      }
+    }
+
+    setWorkspaceSymbols(Array.from(symbolMap.values()).slice(0, 200));
+  }, [collectWorkspaceSymbolsForFile, flatFiles, projectId]);
+
+  const openSymbolAt = useCallback(async (filePath: string, lineNumber: number) => {
+    setSymbolPickerOpen(false);
+    setSymbolQuery('');
+    setActivityView('explorer');
+    try {
+      await openFile(filePath);
+      setTimeout(() => {
+        if (editorRef.current) {
+          editorRef.current.setPosition({ lineNumber, column: 1 });
+          editorRef.current.revealLineInCenter(lineNumber);
+          editorRef.current.focus();
+        }
+      }, 120);
+    } catch {
+      // openFile handles its own error state.
+    }
+  }, []);
+
+  const handleOpenWorkspaceSymbols = useCallback(() => {
+    setSymbolQuery('');
+    void loadWorkspaceSymbols();
+    setSymbolPickerOpen(true);
+  }, [loadWorkspaceSymbols]);
+
+  const handleOpenEditorSymbols = useCallback(() => {
+    if (!activeFile) {
+      setSymbolPickerOpen(false);
+      return;
+    }
+    const symbols = collectWorkspaceSymbolsForFile(activeFile.path, activeFile.content);
+    setWorkspaceSymbols(symbols);
+    setSymbolQuery('');
+    setSymbolPickerOpen(true);
+  }, [activeFile, collectWorkspaceSymbolsForFile]);
 
   const runSearch = useCallback(async (query: string) => {
     if (!projectId || !query.trim()) {
@@ -280,31 +713,242 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
   const [terminalInput, setTerminalInput] = useState('');
   const [terminalRunning, setTerminalRunning] = useState(false);
   const [terminalCwd, setTerminalCwd] = useState('');
+  const [terminalCommandHistory, setTerminalCommandHistory] = useState<string[]>([]);
+  const terminalHistoryIndexRef = useRef<number | null>(null);
+  const [debugConsoleInput, setDebugConsoleInput] = useState('');
+  const [debugConsoleHistory, setDebugConsoleHistory] = useState<string[]>([]);
+  const [debugConsoleEntries, setDebugConsoleEntries] = useState<Array<{ id: string; level: 'info' | 'stdout' | 'stderr' | 'error'; text: string; timestamp: string }>>([]);
   const terminalEndRef = useRef<HTMLDivElement>(null);
+  const debugConsoleEndRef = useRef<HTMLDivElement>(null);
 
-  const runTerminalCommand = async (command: string) => {
+  const appendDebugConsoleEntry = useCallback((level: 'info' | 'stdout' | 'stderr' | 'error', text: string) => {
+    setDebugConsoleEntries(prev => [
+      ...prev,
+      {
+        id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        level,
+        text,
+        timestamp: new Date().toISOString(),
+      },
+    ]);
+  }, []);
+
+  const runTerminalCommand = useCallback(async (command: string) => {
     if (!projectId || !command.trim() || terminalRunning) return;
+    const trimmedCommand = command.trim();
     setTerminalInput('');
+    setDebugConsoleInput('');
+    terminalHistoryIndexRef.current = null;
+    setTerminalCommandHistory(prev => {
+      const list = prev.length > 0 && prev[prev.length - 1] === trimmedCommand ? prev : [...prev, trimmedCommand];
+      return list.slice(-50);
+    });
+    setDebugConsoleHistory(prev => {
+      const list = prev.length > 0 && prev[prev.length - 1] === trimmedCommand ? prev : [...prev, trimmedCommand];
+      return list.slice(-50);
+    });
     setTerminalRunning(true);
     const cwdAtRun = terminalCwd;
     try {
-      const result = await execWorkspaceCommand(projectId, command, cwdAtRun);
-      setTerminalHistory(prev => [...prev, { command, stdout: result.stdout, stderr: result.stderr, code: result.code, cwd: cwdAtRun }]);
+      const result = await execWorkspaceCommand(projectId, trimmedCommand, cwdAtRun);
+      setTerminalHistory(prev => [...prev, { command: trimmedCommand, stdout: result.stdout, stderr: result.stderr, code: result.code, cwd: cwdAtRun }]);
       setTerminalCwd(result.cwd);
+
+      const debugText = [
+        `> ${trimmedCommand}`,
+        result.stdout ? result.stdout.trimEnd() : '',
+        result.stderr ? result.stderr.trimEnd() : '',
+        result.code !== 0 ? `exit code ${result.code}` : '',
+      ].filter(Boolean).join('\n');
+      if (debugText) appendDebugConsoleEntry(result.code === 0 ? 'stdout' : 'error', debugText);
     } catch (err) {
       const message = err instanceof ApiError ? err.message : 'Command failed to run.';
-      // A request-level failure (network/API error, not the command itself
-      // failing) shouldn't silently reset the working directory the user
-      // was in.
-      setTerminalHistory(prev => [...prev, { command, stdout: '', stderr: message, code: 1, cwd: cwdAtRun }]);
+      setTerminalHistory(prev => [...prev, { command: trimmedCommand, stdout: '', stderr: message, code: 1, cwd: cwdAtRun }]);
+      appendDebugConsoleEntry('error', `> ${trimmedCommand}\n${message}`);
     } finally {
       setTerminalRunning(false);
+    }
+  }, [appendDebugConsoleEntry, projectId, terminalCwd, terminalRunning]);
+
+  const handleRunActiveFile = useCallback(async () => {
+    if (!projectId || !activeFile) return;
+
+    const filePath = activeFile.path;
+    const extension = filePath.split('.').pop()?.toLowerCase() ?? '';
+    const runCommands: Record<string, string> = {
+      py: `python3 ${filePath}`,
+      js: `node ${filePath}`,
+      jsx: `node ${filePath}`,
+      ts: `npx tsx ${filePath}`,
+      tsx: `npx tsx ${filePath}`,
+      sh: `bash ${filePath}`,
+      bash: `bash ${filePath}`,
+      json: `python3 -m json.tool ${filePath}`,
+    };
+    const command = runCommands[extension] ?? `python3 ${filePath}`;
+    await runTerminalCommand(command);
+  }, [activeFile, projectId, runTerminalCommand]);
+
+  const handleStartDebugging = useCallback(async () => {
+    if (!projectId || !activeFile) return;
+
+    const filePath = activeFile.path;
+    const extension = filePath.split('.').pop()?.toLowerCase() ?? '';
+    const debugCommands: Record<string, string> = {
+      py: `python3 -m debugpy --listen 5678 --wait-for-client ${filePath}`,
+      js: `node --inspect-brk ${filePath}`,
+      ts: `npx tsx --inspect-brk ${filePath}`,
+      tsx: `npx tsx --inspect-brk ${filePath}`,
+      sh: `bash -x ${filePath}`,
+    };
+    const command = debugCommands[extension] ?? `python3 -m debugpy --listen 5678 --wait-for-client ${filePath}`;
+    appendDebugConsoleEntry('info', `Starting debug session for ${filePath}`);
+    await runTerminalCommand(command);
+  }, [activeFile, projectId, appendDebugConsoleEntry, runTerminalCommand]);
+
+  const openTaskPicker = useCallback(() => {
+    setTaskPickerOpen(true);
+    setTaskQuery('');
+    setBottomPanelOpen(true);
+    setBottomTab('terminal');
+  }, []);
+
+  const runTask = useCallback(async (task: WorkspaceTask) => {
+    if (!projectId) return;
+
+    setTaskPickerOpen(false);
+    setTaskQuery('');
+    setBottomPanelOpen(true);
+    setBottomTab('terminal');
+    setTerminalInput('');
+    setDebugConsoleInput('');
+    setTerminalRunning(true);
+    const cwdAtRun = terminalCwd;
+    const startedAt = new Date().toISOString();
+
+    try {
+      const result = await execWorkspaceCommand(projectId, task.command, cwdAtRun);
+      setTerminalHistory(prev => [...prev, { command: task.command, stdout: result.stdout, stderr: result.stderr, code: result.code, cwd: cwdAtRun }]);
+      setTerminalCwd(result.cwd);
+
+      const taskRecord = {
+        id: `${task.id}-${Date.now()}`,
+        taskId: task.id,
+        label: task.label,
+        command: task.command,
+        status: result.code === 0 ? 'success' as const : 'failed' as const,
+        exitCode: result.code,
+        timestamp: startedAt,
+      };
+
+      recordTaskResult(taskRecord);
+      appendDebugConsoleEntry(result.code === 0 ? 'stdout' : 'error', `[task:${task.label}]\n> ${task.command}\n${result.stdout || result.stderr || `exit code ${result.code}`}`.trim());
+    } catch (err) {
+      const message = err instanceof ApiError ? err.message : 'Task failed to run.';
+      const failedTask = {
+        id: `${task.id}-${Date.now()}`,
+        taskId: task.id,
+        label: task.label,
+        command: task.command,
+        status: 'failed' as const,
+        exitCode: 1,
+        timestamp: startedAt,
+      };
+      recordTaskResult(failedTask);
+      setTerminalHistory(prev => [...prev, { command: task.command, stdout: '', stderr: message, code: 1, cwd: cwdAtRun }]);
+      appendDebugConsoleEntry('error', `[task:${task.label}]\n> ${task.command}\n${message}`);
+    } finally {
+      setTerminalRunning(false);
+    }
+  }, [appendDebugConsoleEntry, projectId, recordTaskResult, terminalCwd]);
+
+  const rerunTaskFromHistory = useCallback(async (taskRecord: { id: string; taskId: string; label: string; command: string; status: TaskRunStatus; exitCode: number; timestamp: string; }) => {
+    const task: WorkspaceTask = {
+      id: taskRecord.taskId,
+      label: taskRecord.label,
+      command: taskRecord.command,
+      description: 'Re-run from recent task history',
+      category: 'workspace',
+    };
+    await runTask(task);
+  }, [runTask]);
+
+  const runValidationCheck = useCallback(async () => {
+    if (!projectId || !activeFile) return;
+
+    const filePath = activeFile.path;
+    const suggestedTask: WorkspaceTask = filePath.includes('/frontend/')
+      ? {
+          id: `validate-frontend-${Date.now()}`,
+          label: 'Validate frontend change',
+          command: 'cd frontend && npm run build',
+          description: 'Build the frontend to catch compile-time regressions in the current workspace.',
+          category: 'frontend',
+        }
+      : filePath.includes('/backend/')
+      ? {
+          id: `validate-backend-${Date.now()}`,
+          label: 'Validate backend change',
+          command: 'cd backend && pytest -q',
+          description: 'Run the backend test suite to confirm the current fix is still valid.',
+          category: 'backend',
+        }
+      : {
+          id: `validate-workspace-${Date.now()}`,
+          label: 'Validate workspace state',
+          command: 'cd frontend && npm run build',
+          description: 'Perform a quick validation pass for the active workspace content.',
+          category: 'workspace',
+        };
+
+    await runTask(suggestedTask);
+  }, [activeFile, projectId, runTask]);
+
+  const handleRunBuildTask = useCallback(() => {
+    const preferred = workspaceTasks.find(task => task.id === 'frontend-build' || task.id === 'backend-tests') ?? workspaceTasks[0];
+    if (!preferred) {
+      openTaskPicker();
+      return;
+    }
+    void runTask(preferred);
+  }, [openTaskPicker, runTask, workspaceTasks]);
+
+  const handleTerminalInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      void runTerminalCommand(terminalInput);
+      return;
+    }
+
+    if (terminalCommandHistory.length === 0) return;
+
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      const currentIndex = terminalHistoryIndexRef.current;
+      const nextIndex = currentIndex === null ? terminalCommandHistory.length - 1 : Math.max(0, currentIndex - 1);
+      terminalHistoryIndexRef.current = nextIndex;
+      setTerminalInput(terminalCommandHistory[nextIndex]);
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      const currentIndex = terminalHistoryIndexRef.current;
+      if (currentIndex === null) return;
+      const nextIndex = currentIndex + 1;
+      if (nextIndex >= terminalCommandHistory.length) {
+        terminalHistoryIndexRef.current = null;
+        setTerminalInput('');
+        return;
+      }
+      terminalHistoryIndexRef.current = nextIndex;
+      setTerminalInput(terminalCommandHistory[nextIndex]);
     }
   };
 
   useEffect(() => {
     terminalEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [terminalHistory]);
+
+  useEffect(() => {
+    debugConsoleEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [debugConsoleEntries]);
 
   // --- Output (real) — the most recent analysis run's pipeline logs for
   // this project, same data source as the Dashboard's per-phase Raw Logs
@@ -361,28 +1005,11 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
     outputEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [outputLogs]);
 
-  // --- Go to File quick-picker (Ctrl+P) ---
-  const [isGoToFileOpen, setIsGoToFileOpen] = useState(false);
-  const [goToFileQuery, setGoToFileQuery] = useState('');
+  useEffect(() => {
+    inspectOpenFilesForDiagnostics();
+  }, [inspectOpenFilesForDiagnostics]);
 
-  const flatFiles = useMemo(() => {
-    const out: string[] = [];
-    const walkTree = (nodes: WorkspaceTreeNode[]) => {
-      for (const node of nodes) {
-        if (node.type === 'file') out.push(node.path);
-        else if (node.children) walkTree(node.children);
-      }
-    };
-    walkTree(tree);
-    return out;
-  }, [tree]);
-
-  const goToFileResults = useMemo(() => {
-    const q = goToFileQuery.trim().toLowerCase();
-    if (!q) return flatFiles.slice(0, 30);
-    return flatFiles.filter(f => f.toLowerCase().includes(q)).slice(0, 30);
-  }, [flatFiles, goToFileQuery]);
-
+  // Go to File quick-picker (Ctrl+P)
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key === 'p') {
@@ -575,6 +1202,12 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
       } else if (!e.shiftKey && e.key.toLowerCase() === 'b') {
         e.preventDefault();
         setActivityView(prev => (prev === 'none' ? 'explorer' : 'none'));
+      } else if (e.key.toLowerCase() === 't' && !e.shiftKey) {
+        e.preventDefault();
+        handleOpenWorkspaceSymbols();
+      } else if (e.key.toLowerCase() === 'o' && e.shiftKey) {
+        e.preventDefault();
+        handleOpenEditorSymbols();
       }
     };
     window.addEventListener('keydown', handler);
@@ -592,6 +1225,7 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
   }, [autoSave, activeFile?.content, activeFile?.path]);
 
   const handleEditorMount: OnMount = (editor, monaco) => {
+    editorRef.current = editor;
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
       if (activePath) void saveFile(activePath);
     });
@@ -824,6 +1458,10 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
     if (tab === 'explorer' || tab === 'search' || tab === 'git' || tab === 'extensions') {
       setActivityView(tab);
     }
+    if (tab === 'debug') {
+      setBottomPanelOpen(true);
+      setBottomTab('debug_console');
+    }
   };
 
   const handleSelectBottomTab = (tab: string) => {
@@ -990,7 +1628,23 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
     void openFile(path);
   };
 
-  const openProblems = bugs.filter(b => b.status === 'Open' || b.status === 'In Review' || b.status === 'AI Suggested');
+  const openAgentWithPrompt = useCallback((prompt: string) => {
+    setAgentPanelOpen(true);
+    setAgentQuickPrompt(prompt);
+  }, []);
+
+  const openProblems = [
+    ...bugs.filter(b => b.status === 'Open' || b.status === 'In Review' || b.status === 'AI Suggested'),
+    ...workspaceDiagnostics,
+  ];
+
+  const symbolResults = useMemo(() => {
+    const q = symbolQuery.trim().toLowerCase();
+    if (!q) return workspaceSymbols.slice(0, 50);
+    return workspaceSymbols.filter(symbol =>
+      symbol.name.toLowerCase().includes(q) || symbol.file.toLowerCase().includes(q)
+    ).slice(0, 50);
+  }, [symbolQuery, workspaceSymbols]);
 
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden bg-[#1E1E1E] text-[#CCCCCC] font-sans select-none">
@@ -1005,9 +1659,15 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
         onToggleRightCopilot={() => setAgentPanelOpen(o => !o)}
         onSelectActivityTab={handleSelectActivityTab}
         onSelectBottomTab={handleSelectBottomTab}
+        onRunActiveFile={handleRunActiveFile}
+        onStartDebugging={handleStartDebugging}
+        onRunBuildTask={handleRunBuildTask}
+        onOpenTaskPicker={openTaskPicker}
         onSaveFile={handleSaveFile}
         onCloseFile={handleCloseFile}
         onOpenModelSelector={onOpenModelSelector}
+        onOpenWorkspaceSymbols={handleOpenWorkspaceSymbols}
+        onOpenEditorSymbols={handleOpenEditorSymbols}
         wordWrap={wordWrap}
         onToggleWordWrap={() => setWordWrap(w => !w)}
         autoSave={autoSave}
@@ -1382,11 +2042,62 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
 
         {activityView === 'extensions' && (
           <div className="w-64 bg-[#252526] border-r border-[#191919] shrink-0 flex flex-col text-xs">
-            <div className="px-3 py-2.5 text-[11px] font-bold tracking-wider uppercase text-[#BBBBBB] border-b border-[#333333]">
-              Extensions
+            <div className="px-3 py-2.5 flex items-center justify-between text-[11px] font-bold tracking-wider uppercase text-[#BBBBBB] border-b border-[#333333]">
+              <span>Extensions</span>
+              <span className="text-[10px] text-[#858585]">{workspaceExtensions.filter(ext => ext.enabled).length}</span>
             </div>
-            <div className="p-3 text-[#858585] leading-relaxed">
-              No extension system exists in this app — this is just a placeholder tab to match the IDE layout.
+
+            <div className="p-2 space-y-2 overflow-y-auto">
+              {workspaceExtensions.map(ext => (
+                <div key={ext.id} className="rounded border border-[#3A3A3A] bg-[#1E1E1E] p-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <div className="text-[11px] font-semibold text-white">{ext.name}</div>
+                      <div className="text-[10px] text-[#858585]">{ext.description}</div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setWorkspaceExtensions(prev => prev.map(item => item.id === ext.id ? { ...item, enabled: !item.enabled } : item))}
+                      className={`rounded px-2 py-1 text-[10px] font-medium ${ext.enabled ? 'bg-indigo-600 text-white' : 'bg-[#2A2D2E] text-[#CCCCCC]'}`}
+                    >
+                      {ext.enabled ? 'Enabled' : 'Disabled'}
+                    </button>
+                  </div>
+
+                  <div className="mt-2 space-y-1">
+                    {(ext.enabled ? ext.tasks : []).map(task => (
+                      <button
+                        key={task.id}
+                        onClick={() => void runTask(task)}
+                        className="w-full text-left rounded border border-[#2D2D2D] bg-[#17191B] px-2 py-1 hover:bg-[#24282B]"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-[10px] text-[#D4D4D4]">{task.label}</span>
+                          <span className="uppercase text-[9px] tracking-wide text-[#6A6A6A]">{task.category}</span>
+                        </div>
+                        <div className="mt-0.5 text-[9px] text-[#858585] font-mono truncate">{task.command}</div>
+                      </button>
+                    ))}
+
+                    {!ext.enabled && (
+                      <div className="text-[10px] text-[#858585] italic">This extension is disabled.</div>
+                    )}
+                  </div>
+                </div>
+              ))}
+
+              <div className="rounded border border-[#3A3A3A] bg-[#17191B] p-2">
+                <div className="text-[11px] font-semibold text-white">Extension architecture</div>
+                <div className="mt-1 text-[10px] leading-relaxed text-[#858585]">
+                  Built-in workspace extensions are now registered in a runtime registry with metadata, enable/disable state, and task composition.
+                </div>
+                <button
+                  onClick={openTaskPicker}
+                  className="mt-2 w-full rounded border border-[#3A3A3A] px-2 py-1 text-[10px] font-medium text-[#D4D4D4] hover:bg-[#2A2D2E]"
+                >
+                  Open task runner
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -1432,6 +2143,41 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
                 {statusMessage && (
                   <span className="text-[11px] text-[#4EC9B0]">{statusMessage}</span>
                 )}
+                {lastTaskResult && (
+                  <span className={`text-[11px] ${lastTaskResult.status === 'success' ? 'text-[#4EC9B0]' : 'text-[#F48771]'}`}>
+                    {lastTaskResult.status === 'success' ? 'Task ok' : 'Task failed'}: {lastTaskResult.label}
+                  </span>
+                )}
+                <div className="flex items-center gap-1.5">
+                  <button
+                    onClick={() => openAgentWithPrompt(`Explain this file and highlight the most important logic, risks, and next steps for ${activeFile.path}.`)}
+                    className="px-2 py-1 rounded bg-[#2D2D2D] text-[#D4D4D4] hover:bg-[#3C3C3C] hover:text-white text-[11px]"
+                    title="Ask the agent to explain the active file"
+                  >
+                    Explain
+                  </button>
+                  <button
+                    onClick={() => openAgentWithPrompt(`Review ${activeFile.path} for bugs, identify any likely root causes, and propose the safest fix.`)}
+                    className="px-2 py-1 rounded bg-[#2D2D2D] text-[#D4D4D4] hover:bg-[#3C3C3C] hover:text-white text-[11px]"
+                    title="Ask the agent to review the active file for bugs"
+                  >
+                    Fix issue
+                  </button>
+                  <button
+                    onClick={() => openAgentWithPrompt(`Generate or improve tests for ${activeFile.path} and explain what each test covers.`)}
+                    className="px-2 py-1 rounded bg-[#2D2D2D] text-[#D4D4D4] hover:bg-[#3C3C3C] hover:text-white text-[11px]"
+                    title="Ask the agent to generate or improve tests"
+                  >
+                    Tests
+                  </button>
+                  <button
+                    onClick={() => void runValidationCheck()}
+                    className="px-2 py-1 rounded bg-[#264F78] text-[#D4D4D4] hover:bg-[#2F628E] hover:text-white text-[11px]"
+                    title="Validate the current code path against the relevant project checks"
+                  >
+                    Validate
+                  </button>
+                </div>
                 <button
                   onClick={() => void saveFile(activeFile.path)}
                   disabled={saving || !isDirty(activeFile)}
@@ -1629,15 +2375,129 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
               )}
 
               {bottomTab === 'debug_console' && (
-                <p className="text-[#858585]">
-                  This app has no debugger to attach to — there's no breakpoint/step-through engine anywhere in the
-                  codebase. This tab is an intentional placeholder to match the IDE layout, not a wiring gap.
-                </p>
+                <div className="flex flex-col h-full font-mono">
+                  <div className="flex-1 overflow-y-auto space-y-1 pb-1">
+                    <div className="flex justify-end mb-1">
+                      <button
+                        onClick={() => setDebugConsoleEntries([])}
+                        className="px-2 py-0.5 rounded border border-[#3A3A3A] text-[#858585] hover:text-white hover:border-[#666]"
+                      >
+                        Clear
+                      </button>
+                    </div>
+                    {debugConsoleEntries.length === 0 ? (
+                      <p className="text-[#858585] font-sans">
+                        Debug console is ready. Run a command below to inspect runtime output and exceptions.
+                      </p>
+                    ) : (
+                      debugConsoleEntries.map(entry => (
+                        <div key={entry.id} className="whitespace-pre-wrap break-words text-[12px]">
+                          <span className="text-[#6A6A6A]">[{new Date(entry.timestamp).toISOString().replace('T', ' ').replace('Z', '')}]</span>{' '}
+                          <span className={
+                            entry.level === 'error' || entry.level === 'stderr'
+                              ? 'text-[#F48771]'
+                              : entry.level === 'stdout'
+                              ? 'text-[#4EC9B0]'
+                              : 'text-[#9CDCFE]'
+                          }>
+                            {entry.level.toUpperCase()}
+                          </span>{' '}
+                          <span className="text-[#CCCCCC]">{entry.text}</span>
+                        </div>
+                      ))
+                    )}
+                    <div ref={debugConsoleEndRef} />
+                  </div>
+                  <div className="flex items-center gap-2 border-t border-[#2D2D2D] pt-1.5 shrink-0">
+                    <span className="text-[#6A6A6A]">Debug</span>
+                    {debugConsoleHistory.length > 0 && (
+                      <select
+                        value=""
+                        onChange={(e) => {
+                          const next = e.target.value;
+                          if (next) {
+                            setDebugConsoleInput(next);
+                            e.target.value = '';
+                          }
+                        }}
+                        className="bg-[#2A2A2A] text-[#CCCCCC] border border-[#3A3A3A] rounded px-1 py-0.5 text-[10px] outline-none"
+                        aria-label="Debug command history"
+                      >
+                        <option value="">History</option>
+                        {[...debugConsoleHistory].reverse().map((entry) => (
+                          <option key={entry} value={entry}>{entry}</option>
+                        ))}
+                      </select>
+                    )}
+                    <input
+                      value={debugConsoleInput}
+                      onChange={e => setDebugConsoleInput(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter') void runTerminalCommand(debugConsoleInput);
+                      }}
+                      disabled={terminalRunning || !projectId}
+                      placeholder={terminalRunning ? 'Running...' : 'Run a command here...'}
+                      className="flex-1 bg-transparent text-white outline-none disabled:opacity-50"
+                    />
+                    <button
+                      onClick={() => void runTerminalCommand(debugConsoleInput)}
+                      disabled={terminalRunning || !projectId || !debugConsoleInput.trim()}
+                      className="px-2 py-1 rounded bg-[#007ACC] text-white hover:bg-[#0062A3] disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      Run
+                    </button>
+                  </div>
+                </div>
               )}
 
               {bottomTab === 'terminal' && (
                 <div className="flex flex-col h-full font-mono">
+                  <div className="mb-2 rounded border border-[#2D2D2D] bg-[#202225] p-2">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-[10px] uppercase tracking-wide text-[#858585]">Recent Tasks</span>
+                      <button
+                        onClick={() => {
+                          setTaskHistory([]);
+                          setLastTaskResult(null);
+                        }}
+                        className="text-[10px] text-[#858585] hover:text-white"
+                      >
+                        Clear
+                      </button>
+                    </div>
+                    {taskHistory.length === 0 ? (
+                      <p className="text-[#858585] text-[11px]">No recent task runs yet.</p>
+                    ) : (
+                      <div className="space-y-1">
+                        {taskHistory.map((entry) => (
+                          <div key={entry.id} className="flex items-center justify-between gap-2 rounded border border-[#2D2D2D] bg-[#1B1D1F] px-2 py-1">
+                            <button
+                              onClick={() => void rerunTaskFromHistory(entry)}
+                              className="flex-1 min-w-0 text-left hover:text-white"
+                              title={`Re-run ${entry.label}`}
+                            >
+                              <div className="flex items-center gap-2 text-[11px]">
+                                <span className={entry.status === 'success' ? 'text-[#4EC9B0]' : 'text-[#F48771]'}>{entry.status === 'success' ? 'OK' : 'FAIL'}</span>
+                                <span className="truncate text-[#CCCCCC]">{entry.label}</span>
+                              </div>
+                              <div className="mt-0.5 truncate text-[10px] text-[#858585] font-mono">{entry.command}</div>
+                            </button>
+                            <span className="text-[10px] text-[#6A6A6A] whitespace-nowrap">{new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
                   <div className="flex-1 overflow-y-auto space-y-2 pb-1">
+                    <div className="flex justify-end mb-1">
+                      <button
+                        onClick={() => setTerminalHistory([])}
+                        className="px-2 py-0.5 rounded border border-[#3A3A3A] text-[#858585] hover:text-white hover:border-[#666]"
+                      >
+                        Clear output
+                      </button>
+                    </div>
                     {terminalHistory.length === 0 && (
                       <p className="text-[#858585] font-sans">
                         Runs a real command inside a sandboxed Docker container, mounted to this workspace.
@@ -1662,12 +2522,29 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
                   <div className="flex items-center gap-1.5 border-t border-[#2D2D2D] pt-1.5 shrink-0">
                     <span className="text-[#6A6A6A]">{`/workspace${terminalCwd ? '/' + terminalCwd : ''}`}</span>
                     <span className="text-[#4EC9B0]">$</span>
+                    {terminalCommandHistory.length > 0 && (
+                      <select
+                        value=""
+                        onChange={(e) => {
+                          const next = e.target.value;
+                          if (next) {
+                            setTerminalInput(next);
+                            e.target.value = '';
+                          }
+                        }}
+                        className="bg-[#2A2A2A] text-[#CCCCCC] border border-[#3A3A3A] rounded px-1 py-0.5 text-[10px] outline-none"
+                        aria-label="Terminal command history"
+                      >
+                        <option value="">History</option>
+                        {[...terminalCommandHistory].reverse().map((entry) => (
+                          <option key={entry} value={entry}>{entry}</option>
+                        ))}
+                      </select>
+                    )}
                     <input
                       value={terminalInput}
                       onChange={e => setTerminalInput(e.target.value)}
-                      onKeyDown={e => {
-                        if (e.key === 'Enter') void runTerminalCommand(terminalInput);
-                      }}
+                      onKeyDown={handleTerminalInputKeyDown}
                       disabled={terminalRunning || !projectId}
                       placeholder={terminalRunning ? 'Running...' : 'Type a command and press Enter'}
                       className="flex-1 bg-transparent text-white outline-none disabled:opacity-50"
@@ -1696,6 +2573,7 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
             projectId={projectId}
             activeModel={activeModel}
             activePath={activeFile?.path ?? null}
+            initialPrompt={agentQuickPrompt}
             onCollapse={() => setAgentPanelOpen(false)}
             onFileWritten={(path) => {
               // Refresh the file if it's currently open, and always refresh the tree
@@ -1756,6 +2634,61 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
         </div>
       </footer>
 
+      {taskPickerOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-black/60 flex items-start justify-center pt-24"
+          onClick={() => setTaskPickerOpen(false)}
+        >
+          <div
+            className="w-[560px] bg-[#1E1E1E] border border-[#3A3A3A] shadow-2xl rounded-lg overflow-hidden"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-3 py-2 border-b border-[#2D2D2D] bg-[#252526]">
+              <div>
+                <div className="text-sm font-semibold text-white">Task Runner</div>
+                <div className="text-[11px] text-[#858585]">Choose a project task to run in the workspace terminal.</div>
+              </div>
+              <button
+                onClick={() => setTaskPickerOpen(false)}
+                className="text-[#858585] hover:text-white"
+                title="Close"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-3 border-b border-[#2D2D2D]">
+              <input
+                autoFocus
+                value={taskQuery}
+                onChange={e => setTaskQuery(e.target.value)}
+                placeholder="Filter tasks..."
+                className="w-full bg-[#2A2A2A] text-white rounded border border-[#3A3A3A] px-2 py-1.5 text-xs outline-none"
+              />
+            </div>
+            <div className="max-h-[320px] overflow-auto p-2">
+              {taskResults.length === 0 ? (
+                <div className="text-[#858585] text-xs p-2">No matching tasks.</div>
+              ) : (
+                taskResults.map(task => (
+                  <button
+                    key={task.id}
+                    onClick={() => void runTask(task)}
+                    className="w-full text-left rounded px-2 py-2 hover:bg-[#2A2D2E] border border-transparent hover:border-[#3A3A3A]"
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-sm text-white">{task.label}</span>
+                      <span className="uppercase text-[10px] tracking-wide text-[#6A6A6A]">{task.category}</span>
+                    </div>
+                    <div className="mt-1 text-[11px] text-[#858585] font-mono">{task.command}</div>
+                    <div className="mt-1 text-[11px] text-[#9CDCFE]">{task.description}</div>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {isGoToFileOpen && (
         <div
           className="fixed inset-0 z-50 bg-black/60 flex items-start justify-center pt-24"
@@ -1802,6 +2735,48 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
                   </button>
                 );
               })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {symbolPickerOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-black/60 flex items-start justify-center pt-24"
+          onClick={() => setSymbolPickerOpen(false)}
+        >
+          <div
+            className="w-full max-w-xl bg-[#252526] border border-[#454545] rounded-lg shadow-2xl overflow-hidden"
+            onClick={e => e.stopPropagation()}
+          >
+            <input
+              autoFocus
+              value={symbolQuery}
+              onChange={e => setSymbolQuery(e.target.value)}
+              onKeyDown={e => {
+                if (e.key === 'Enter' && symbolResults[0]) {
+                  void openSymbolAt(symbolResults[0].file, symbolResults[0].line);
+                }
+                if (e.key === 'Escape') setSymbolPickerOpen(false);
+              }}
+              placeholder="Go to symbol..."
+              className="w-full bg-transparent text-white text-sm px-4 py-3 outline-none border-b border-[#333333]"
+            />
+            <div className="max-h-80 overflow-y-auto py-1">
+              {symbolResults.length === 0 && (
+                <p className="px-4 py-3 text-[#858585] text-xs">No matching symbols.</p>
+              )}
+              {symbolResults.map(symbol => (
+                <button
+                  key={symbol.id}
+                  onClick={() => void openSymbolAt(symbol.file, symbol.line)}
+                  className="w-full flex items-center gap-2 px-4 py-2 hover:bg-[#2A2D2E] text-left text-xs"
+                >
+                  <span className="text-[#9CDCFE] uppercase tracking-wide text-[10px]">{symbol.kind}</span>
+                  <span className="text-[#CCCCCC]">{symbol.name}</span>
+                  <span className="text-[#858585] truncate">{symbol.file}:{symbol.line}</span>
+                </button>
+              ))}
             </div>
           </div>
         </div>

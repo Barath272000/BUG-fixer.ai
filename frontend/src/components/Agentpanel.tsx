@@ -23,6 +23,8 @@ interface AgentPanelProps {
   /** Workspace-relative path of the file currently open in the editor, so the
    * agent can see it automatically without the user having to name it. */
   activePath?: string | null;
+  /** Prefilled prompt used when a workspace action requests a quick AI task. */
+  initialPrompt?: string | null;
   /** Called after a proposal is approved and written to disk, so the editor/tree can refresh. */
   onFileWritten?: (path: string) => void;
   /** Called when the user clicks the panel's own minimize arrow. */
@@ -31,7 +33,7 @@ interface AgentPanelProps {
 
 type ProposalUiStatus = 'idle' | 'applying' | 'applied' | 'rejected' | 'error';
 
-export const AgentPanel: React.FC<AgentPanelProps> = ({ projectId, activeModel, activePath, onFileWritten, onCollapse }) => {
+export const AgentPanel: React.FC<AgentPanelProps> = ({ projectId, activeModel, activePath, initialPrompt, onFileWritten, onCollapse }) => {
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [messages, setMessages] = useState<CopilotMessage[]>([]);
   const [input, setInput] = useState('');
@@ -39,6 +41,12 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ projectId, activeModel, 
   const [error, setError] = useState<string | null>(null);
   const [proposalStatuses, setProposalStatuses] = useState<Record<string, ProposalUiStatus>>({});
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (initialPrompt) {
+      setInput(initialPrompt);
+    }
+  }, [initialPrompt]);
 
   useEffect(() => {
     if (!projectId) return;
