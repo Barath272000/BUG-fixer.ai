@@ -5,7 +5,9 @@
     "ghcr.io/devcontainers/features/node:1": {
       "version": "20"
     },
-    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
+      "moby": false
+    }
   },
   "mounts": [
     "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
@@ -17,5 +19,13 @@
     "5432": { "label": "Postgres", "visibility": "private" },
     "6379": { "label": "Redis", "visibility": "private" }
   },
-  "postCreateCommand": "pip install -r backend/requirements.txt && cd frontend && npm install"
+  "runArgs": [
+    "--security-opt=seccomp=unconfined",
+    "--security-opt=apparmor=unconfined",
+    "--cap-add=SYS_ADMIN",
+    "--cap-add=NET_ADMIN",
+    "--device=/dev/fuse",
+    "--device=/dev/net/tun"
+  ],
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y podman uidmap slirp4netns fuse-overlayfs && pip install -r backend/requirements.txt && cd frontend && npm install"
 }

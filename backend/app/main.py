@@ -64,8 +64,11 @@ async def lifespan(app: FastAPI):
     os.makedirs(settings.SANDBOX_WORK_ROOT, exist_ok=True)
     os.makedirs(settings.LIVE_WORKSPACE_ROOT, exist_ok=True)
     os.makedirs(settings.PIPELINE_SANDBOX_ROOT, exist_ok=True)
+    os.makedirs(settings.PIPELINE_TMPFS_ROOT, exist_ok=True)
     await connect_database()
     yield
+    from app.modules.orchestrator.pipeline import pipeline_manager
+    await pipeline_manager.shutdown()
     await disconnect_database()
 
 
