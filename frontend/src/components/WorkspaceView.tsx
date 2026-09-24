@@ -57,6 +57,14 @@ import {
 import { fetchAnalysisLogs, fetchLatestAnalysisRun } from '../api/analysis';
 import { ApiError } from '../api/client';
 import { getPreviewState, startPreview, stopPreview } from '../api/preview';
+import {
+  connectOrchestratorStream,
+  fetchOrchestratorState,
+  OrchestratorStateName,
+  startNativeIdeCore,
+  stopNativeIdeCore,
+  setOrchestratorState,
+} from '../api/orchestrator';
 import { addRecentFile } from '../utils/recentFiles';
 import { AgentPanel } from './Agentpanel';
 import { IdeMenuBar } from './IdeMenuBar';
@@ -504,6 +512,55 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
   const [fileError, setFileError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [orchestratorState, setOrchestratorStateValue] = useState<OrchestratorStateName>('live');
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetchOrchestratorState()
+      .then(result => {
+        if (!cancelled) setOrchestratorStateValue(result.active);
+      })
+      .catch(() => undefined);
+
+    const socket = connectOrchestratorStream(event => {
+      if (
+        !cancelled
+        && event.type === 'state.changed'
+        && (event.payload.active === 'live' || event.payload.active === 'staging')
+      ) {
+        setOrchestratorStateValue(event.payload.active as OrchestratorStateName);
+      }
+    });
+    return () => {
+      cancelled = true;
+      socket.close();
+    };
+  }, []);
+
+  const changeOrchestratorState = (nextState: OrchestratorStateName) => {
+    setOrchestratorStateValue(nextState);
+    void setOrchestratorState(nextState).catch(() => {
+      setStatusMessage('Could not change workspace state.');
+    });
+  };
+
+  const handleStartIdeCore = async () => {
+    try {
+      const result = await startNativeIdeCore();
+      setStatusMessage(`Native IDE Core running on ${result.host}:${result.port} with reload enabled.`);
+    } catch (err) {
+      setStatusMessage(err instanceof ApiError ? err.message : 'Could not start the native IDE Core.');
+    }
+  };
+
+  const handleStopIdeCore = async () => {
+    try {
+      await stopNativeIdeCore();
+      setStatusMessage('Native IDE Core stopped.');
+    } catch (err) {
+      setStatusMessage(err instanceof ApiError ? err.message : 'Could not stop the native IDE Core.');
+    }
+  };
 
   // --- New file / new folder UI ---
   const [creatingPath, setCreatingPath] = useState<string | null>(null); // parent folder path, '' for root
@@ -1996,6 +2053,8 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
         onNewTerminal={createTerminalSession}
         onRunActiveFile={handleRunActiveFile}
         onStartDebugging={handleStartDebugging}
+        onStartIdeCore={() => void handleStartIdeCore()}
+        onStopIdeCore={() => void handleStopIdeCore()}
         onRunBuildTask={handleRunBuildTask}
         onOpenTaskPicker={openTaskPicker}
         onSaveFile={handleSaveFile}
@@ -2007,6 +2066,8 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
         onToggleWordWrap={() => setWordWrap(w => !w)}
         autoSave={autoSave}
         onToggleAutoSave={() => setAutoSave(a => !a)}
+        orchestratorState={orchestratorState}
+        onChangeOrchestratorState={changeOrchestratorState}
         onOpenGoToFile={() => {
           setGoToFileQuery('');
           setIsGoToFileOpen(true);

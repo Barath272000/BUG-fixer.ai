@@ -49,6 +49,8 @@ class Settings(BaseSettings):
 
     STORAGE_ROOT: str = str(_BACKEND_ROOT / "storage")
     SANDBOX_WORK_ROOT: str = str(_BACKEND_ROOT / "sandbox-work")
+    LIVE_WORKSPACE_ROOT: str = str(_BACKEND_ROOT / "live-workspace")
+    PIPELINE_SANDBOX_ROOT: str = str(_BACKEND_ROOT / "pipeline-sandbox")
     MAX_UPLOAD_BYTES: int = 524_288_000
     SANDBOX_TIMEOUT_MS: int = 300_000
     SANDBOX_CPU_LIMIT: float = 2
@@ -56,7 +58,7 @@ class Settings(BaseSettings):
     SANDBOX_PIDS_LIMIT: int = 256
     SANDBOX_NETWORK_MODE: Literal["none", "bridge"] = "none"
 
-    @field_validator("STORAGE_ROOT", "SANDBOX_WORK_ROOT")
+    @field_validator("STORAGE_ROOT", "SANDBOX_WORK_ROOT", "LIVE_WORKSPACE_ROOT", "PIPELINE_SANDBOX_ROOT")
     @classmethod
     def _resolve_storage_path(cls, value: str) -> str:
         """Even if .env explicitly sets a relative path (e.g. the
