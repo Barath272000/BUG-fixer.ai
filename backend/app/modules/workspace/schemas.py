@@ -48,6 +48,38 @@ class ExecResult(BaseModel):
     cwd: str
 
 
+class TerminalInput(BaseModel):
+    data: str
+
+
+class TerminalStartRequest(BaseModel):
+    shell: Literal["bash", "sh"] = "bash"
+
+
+class TerminalSessionResponse(BaseModel):
+    id: str
+    workspace: str
+
+
+class TerminalOutputResponse(BaseModel):
+    chunks: list[str]
+    next: int
+    running: bool
+
+
+class TerminalProcess(BaseModel):
+    id: str
+    pid: int
+    running: bool
+
+
+class WorkspacePort(BaseModel):
+    port: int
+    pid: int
+    command: str
+    source: str
+
+
 class SearchMatch(BaseModel):
     file: str
     line: int

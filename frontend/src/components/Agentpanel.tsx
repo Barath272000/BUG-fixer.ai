@@ -151,7 +151,7 @@ export const AgentPanel: React.FC<AgentPanelProps> = ({ projectId, activeModel, 
   };
 
   return (
-    <div className="w-80 shrink-0 bg-[#181818] border-l border-[#2D2D2D] flex flex-col h-full text-[#CCCCCC]">
+    <div className="w-full h-full bg-[#181818] border-l border-[#2D2D2D] flex flex-col text-[#CCCCCC]">
       <div className="h-9 px-3 flex items-center justify-between border-b border-[#2D2D2D] shrink-0">
         <div className="flex items-center gap-1.5 text-xs font-semibold tracking-wide text-[#CCCCCC]">
           <Sparkles className="w-3.5 h-3.5 text-[#9CDCFE]" />

@@ -12,6 +12,7 @@ class PreviewStartResponse(BaseModel):
     url: str
     command: str
     port: int
+    hostPort: int
     build: str  # "original" | "patched"
     patchedFileCount: int
     fixCount: int

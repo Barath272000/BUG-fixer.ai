@@ -172,13 +172,21 @@ async def exec_command(db: AsyncSession, user_id: str, workspace_id: str, comman
 
     start_cwd = _normalize_cwd(cwd)
     wrapped = (
+        'whoami() { printf "sandbox\\n"; }; '
+        'id() { if [ "$1" = "-un" ]; then printf "sandbox\\n"; else command id "$@"; fi; }; '
+        'export USER=sandbox LOGNAME=sandbox HOME=/tmp; '
         'cd "/workspace/$BF_START_CWD" 2>/dev/null || cd /workspace; '
         f"{command}\n"
         f'__bf_ec=$?; printf "\\n{_CWD_MARKER}%s|%s\\n" "$(pwd)" "$__bf_ec"'
     )
 
     try:
-        result = await run_sandbox(ws.rootPath, wrapped, extra_env={"BF_START_CWD": start_cwd})
+        result = await run_sandbox(
+            ws.rootPath,
+            wrapped,
+            language=ws.project.language if ws.project else None,
+            extra_env={"BF_START_CWD": start_cwd},
+        )
     except FileNotFoundError as exc:
         # `docker` CLI isn't installed / on PATH in this environment.
         raise AppError(

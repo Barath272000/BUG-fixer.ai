@@ -20,6 +20,7 @@ export interface PreviewStartResponse {
   url: string;
   command: string;
   port: number;
+  hostPort: number;
   build: PreviewBuild;
   patchedFileCount: number;
   fixCount: number;

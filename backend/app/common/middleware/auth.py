@@ -21,14 +21,27 @@ class AuthUser:
 DEV_USER_EMAIL = "dev@bugfixer.local"
 
 
-async def _get_or_create_dev_user(db: AsyncSession) -> User:
-    user = (await db.execute(select(User).where(User.email == DEV_USER_EMAIL))).scalar_one_or_none()
-    if user is None:
-        user = User(email=DEV_USER_EMAIL, passwordHash="", displayName="Dev User")
-        db.add(user)
-        await db.commit()
-        await db.refresh(user)
-    return user
+async def _get_or_create_dev_user(db: AsyncSession | None = None) -> AuthUser:
+    fallback_user = AuthUser(
+        id="dev-user",
+        email=DEV_USER_EMAIL,
+        displayName="Dev User",
+        role="user",
+    )
+
+    if db is None:
+        return fallback_user
+
+    try:
+        user = (await db.execute(select(User).where(User.email == DEV_USER_EMAIL))).scalar_one_or_none()
+        if user is None:
+            user = User(email=DEV_USER_EMAIL, passwordHash="", displayName="Dev User")
+            db.add(user)
+            await db.commit()
+            await db.refresh(user)
+        return AuthUser(id=user.id, email=user.email, displayName=user.displayName, role=user.role.value)
+    except Exception:
+        return fallback_user
 
 
 async def require_auth(
@@ -36,8 +49,7 @@ async def require_auth(
     db: AsyncSession = Depends(get_db),
 ) -> AuthUser:
     if settings.DEV_SKIP_AUTH:
-        user = await _get_or_create_dev_user(db)
-        return AuthUser(id=user.id, email=user.email, displayName=user.displayName, role=user.role.value)
+        return await _get_or_create_dev_user(db)
 
     if not authorization or not authorization.startswith("Bearer "):
         raise AppError(401, "AUTH_REQUIRED", "Authentication is required")

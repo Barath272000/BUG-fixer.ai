@@ -1,5 +1,5 @@
 """Mirrors: backend/src/modules/workspace/workspace.routes.ts + workspace.controller.ts"""
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.common.middleware.auth import AuthUser, require_auth
@@ -19,6 +19,12 @@ from app.modules.workspace.schemas import (
     RenameResponse,
     SearchMatch,
     TreeNode,
+    TerminalInput,
+    TerminalStartRequest,
+    TerminalOutputResponse,
+    TerminalSessionResponse,
+    TerminalProcess,
+    WorkspacePort,
     WriteFileRequest,
     WriteFileResponse,
 )
@@ -35,8 +41,106 @@ from app.modules.workspace.service import (
     tree,
     write_file,
 )
+from app.modules.workspace.service import workspace_for
+from app.modules.workspace.terminal_manager import terminal_manager
 
 router = APIRouter(prefix="/workspaces", tags=["workspace"])
+
+
+async def _owned_terminal(workspace_id: str, session_id: str, current_user: AuthUser, db: AsyncSession):
+    workspace = await workspace_for(db, current_user.id, workspace_id)
+    session = await terminal_manager.get(session_id)
+    if session is None or session.workspace != workspace.rootPath:
+        raise HTTPException(status_code=404, detail="Terminal session was not found")
+    return session
+
+
+@router.post("/{workspace_id}/terminal", response_model=TerminalSessionResponse)
+async def start_terminal(
+    workspace_id: str,
+    payload: TerminalStartRequest | None = None,
+    current_user: AuthUser = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    workspace = await workspace_for(db, current_user.id, workspace_id)
+    session = await terminal_manager.start(workspace.rootPath, (payload or TerminalStartRequest()).shell)
+    return TerminalSessionResponse(id=session.id, workspace=workspace_id)
+
+
+@router.get("/{workspace_id}/terminal/processes", response_model=list[TerminalProcess])
+async def terminal_processes(
+    workspace_id: str,
+    current_user: AuthUser = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    workspace = await workspace_for(db, current_user.id, workspace_id)
+    return await terminal_manager.list_for_workspace(workspace.rootPath)
+
+
+@router.get("/{workspace_id}/ports", response_model=list[WorkspacePort])
+async def workspace_ports(
+    workspace_id: str,
+    current_user: AuthUser = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    workspace = await workspace_for(db, current_user.id, workspace_id)
+    return await terminal_manager.listening_ports(workspace.rootPath)
+
+
+@router.get("/{workspace_id}/terminal/{session_id}/output", response_model=TerminalOutputResponse)
+async def terminal_output(
+    workspace_id: str,
+    session_id: str,
+    after: int = Query(default=0, ge=0),
+    current_user: AuthUser = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    await _owned_terminal(workspace_id, session_id, current_user, db)
+    try:
+        chunks, next_cursor, running = await terminal_manager.output(session_id, after)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Terminal session was not found") from exc
+    return TerminalOutputResponse(chunks=chunks, next=next_cursor, running=running)
+
+
+@router.post("/{workspace_id}/terminal/{session_id}/input", status_code=204)
+async def terminal_input(
+    workspace_id: str,
+    session_id: str,
+    payload: TerminalInput,
+    current_user: AuthUser = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    await _owned_terminal(workspace_id, session_id, current_user, db)
+    try:
+        await terminal_manager.write(session_id, payload.data)
+    except KeyError as exc:
+        raise HTTPException(status_code=409, detail="Terminal session is no longer running") from exc
+
+
+@router.delete("/{workspace_id}/terminal/{session_id}", status_code=204)
+async def stop_terminal(
+    workspace_id: str,
+    session_id: str,
+    current_user: AuthUser = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    await _owned_terminal(workspace_id, session_id, current_user, db)
+    await terminal_manager.stop(session_id)
+
+
+@router.post("/{workspace_id}/terminal/{session_id}/interrupt", status_code=204)
+async def interrupt_terminal(
+    workspace_id: str,
+    session_id: str,
+    current_user: AuthUser = Depends(require_auth),
+    db: AsyncSession = Depends(get_db),
+):
+    await _owned_terminal(workspace_id, session_id, current_user, db)
+    try:
+        await terminal_manager.interrupt(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=409, detail="Terminal session is no longer running") from exc
 
 
 @router.get("/{workspace_id}/tree", response_model=list[TreeNode])

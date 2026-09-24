@@ -8,11 +8,26 @@ and flags line up exactly. Requires the `docker` CLI to be available and
 mount from docker-compose.yml).
 """
 import asyncio
+import os
 import time
 from dataclasses import dataclass
 
 from app.modules.sandbox.resource_limits import sandbox_limits
 from app.modules.sandbox.sandbox_images import image_for_language
+
+
+def _docker_workspace_path(workspace: str) -> str:
+    """Translate the API container path to the path visible to the Docker daemon.
+
+    With Docker-outside-of-container, bind-mount source paths are resolved by
+    the daemon, not by the backend container. Compose supplies the host root so
+    sandbox containers see the same files as the workspace API.
+    """
+    container_root = "/app/sandbox-work"
+    host_root = os.environ.get("SANDBOX_HOST_ROOT")
+    if host_root and (workspace == container_root or workspace.startswith(f"{container_root}/")):
+        return f"{host_root}{workspace[len(container_root):]}"
+    return workspace
 
 
 @dataclass
@@ -34,6 +49,7 @@ async def start_preview_container(workspace: str, command: str, language: str, c
     clicks Preview, never automatically.
     """
     image = image_for_language(language)
+    docker_workspace = _docker_workspace_path(workspace)
     await stop_preview_container(name)  # idempotent: replace any previous preview for this project
 
     args = [
@@ -45,7 +61,7 @@ async def start_preview_container(workspace: str, command: str, language: str, c
         "--memory", sandbox_limits.memory,
         "--pids-limit", str(sandbox_limits.pids),
         "--user", "10001:10001",
-        "-v", f"{workspace}:/workspace:rw",
+        "-v", f"{docker_workspace}:/workspace:rw",
         "-w", "/workspace",
         image,
         "/bin/sh", "-lc", command,
@@ -87,6 +103,7 @@ async def execute_in_docker(
     prior behavior exactly as it was.
     """
     image = image_for_language(language or "python")
+    docker_workspace = _docker_workspace_path(workspace)
     args = [
         "docker", "run", "--rm",
         "--network", network or sandbox_limits.network,
@@ -102,7 +119,7 @@ async def execute_in_docker(
     for key, value in (extra_env or {}).items():
         args += ["-e", f"{key}={value}"]
     args += [
-        "-v", f"{workspace}:/workspace:rw",
+        "-v", f"{docker_workspace}:/workspace:rw",
         "-w", "/workspace",
         image,
         "/bin/sh", "-lc", command,

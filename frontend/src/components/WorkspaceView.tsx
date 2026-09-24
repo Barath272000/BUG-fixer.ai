@@ -5,6 +5,7 @@ import {
   ChevronLeft,
   ChevronDown,
   ChevronRight,
+  ExternalLink,
   Files,
   File as FileIcon,
   FileCode,
@@ -17,7 +18,9 @@ import {
   Package,
   PanelBottom,
   Pencil,
+  Play,
   RefreshCw,
+  Radio,
   Save,
   Search,
   Sparkles,
@@ -33,19 +36,27 @@ import {
   fetchWorkspaceTree,
   saveWorkspaceFile,
   WorkspaceTreeNode,
-  execWorkspaceCommand,
+  WorkspaceExecResult,
   searchWorkspaceFiles,
   WorkspaceSearchMatch,
   fetchWorkspaceGitStatus,
   fetchWorkspaceGitDiff,
+  fetchPersistentTerminalProcesses,
+  fetchWorkspacePorts,
   commitWorkspaceChanges,
   WorkspaceGitStatus,
   deleteWorkspacePath,
   renameWorkspacePath,
   createWorkspaceFolder,
+  interruptPersistentTerminal,
+  readPersistentTerminalOutput,
+  sendPersistentTerminalInput,
+  startPersistentTerminal,
+  stopPersistentTerminal,
 } from '../api/workspace';
 import { fetchAnalysisLogs, fetchLatestAnalysisRun } from '../api/analysis';
 import { ApiError } from '../api/client';
+import { getPreviewState, startPreview, stopPreview } from '../api/preview';
 import { addRecentFile } from '../utils/recentFiles';
 import { AgentPanel } from './Agentpanel';
 import { IdeMenuBar } from './IdeMenuBar';
@@ -59,7 +70,19 @@ interface WorkspaceViewProps {
 }
 
 type ActivityView = 'explorer' | 'search' | 'git' | 'extensions' | 'none';
-type BottomTab = 'problems' | 'output' | 'terminal' | 'debug_console';
+type BottomTab = 'problems' | 'output' | 'terminal' | 'debug_console' | 'ports';
+
+type WorkspacePort = {
+  id: string;
+  port: number;
+  name: string;
+  description: string;
+  source: string;
+  protocol: 'http' | 'tcp';
+  browser: boolean;
+  visibility: 'private' | 'public';
+  url?: string;
+};
 
 type TaskRunStatus = 'success' | 'failed';
 
@@ -212,6 +235,21 @@ const EXTENSION_TO_MONACO_LANGUAGE: Record<string, string> = {
   txt: 'plaintext',
 };
 
+const WORKSPACE_PORTS: WorkspacePort[] = [
+  { id: 'frontend', port: 3000, name: 'Frontend', description: 'Vite development server', source: 'Codespace', protocol: 'http', browser: true, visibility: 'private' },
+  { id: 'backend', port: 4000, name: 'Backend API', description: 'FastAPI application', source: 'Docker', protocol: 'http', browser: true, visibility: 'private' },
+  { id: 'postgres', port: 5432, name: 'PostgreSQL', description: 'Database service', source: 'Docker', protocol: 'tcp', browser: false, visibility: 'private' },
+  { id: 'redis', port: 6379, name: 'Redis', description: 'Cache and task queue', source: 'Docker', protocol: 'tcp', browser: false, visibility: 'private' },
+];
+
+function getWorkspacePortUrl(port: number): string {
+  const { protocol, hostname } = window.location;
+  const codespacesHost = hostname.match(/^(.*)-\d+(\.app\.github\.dev|\.githubpreview\.dev)$/);
+  if (codespacesHost) return `${protocol}//${codespacesHost[1]}-${port}${codespacesHost[2]}`;
+  if (hostname === 'localhost' || hostname === '127.0.0.1') return `${protocol}//${hostname}:${port}`;
+  return `${protocol}//${hostname}:${port}`;
+}
+
 function monacoLanguageFor(path: string): string {
   const name = path.split('/').pop() ?? path;
   if (name.toLowerCase() === 'dockerfile') return 'dockerfile';
@@ -320,8 +358,124 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
   // --- Activity bar / panel layout state ---
   const [activityView, setActivityView] = useState<ActivityView>('explorer');
   const [agentPanelOpen, setAgentPanelOpen] = useState(true);
+  const [agentPanelWidth, setAgentPanelWidth] = useState(320);
   const [bottomPanelOpen, setBottomPanelOpen] = useState(true);
+  const [bottomPanelHeight, setBottomPanelHeight] = useState(176);
   const [bottomTab, setBottomTab] = useState<BottomTab>('problems');
+  const resizeCleanupRef = useRef<(() => void) | null>(null);
+
+  const beginPanelResize = useCallback((direction: 'bottom' | 'agent', event: React.PointerEvent) => {
+    event.preventDefault();
+    resizeCleanupRef.current?.();
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const initialWidth = agentPanelWidth;
+    const initialHeight = bottomPanelHeight;
+    const handleMove = (moveEvent: PointerEvent) => {
+      if (direction === 'agent') {
+        const maxWidth = Math.min(640, window.innerWidth - 420);
+        setAgentPanelWidth(Math.min(Math.max(initialWidth + startX - moveEvent.clientX, 280), maxWidth));
+      } else {
+        const maxHeight = Math.min(520, window.innerHeight - 180);
+        setBottomPanelHeight(Math.min(Math.max(initialHeight + startY - moveEvent.clientY, 120), maxHeight));
+      }
+    };
+    const handleUp = () => {
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      document.removeEventListener('pointermove', handleMove);
+      document.removeEventListener('pointerup', handleUp);
+      resizeCleanupRef.current = null;
+    };
+    document.body.style.cursor = direction === 'agent' ? 'col-resize' : 'row-resize';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('pointermove', handleMove);
+    document.addEventListener('pointerup', handleUp);
+    resizeCleanupRef.current = handleUp;
+  }, [agentPanelWidth, bottomPanelHeight]);
+
+  useEffect(() => () => resizeCleanupRef.current?.(), []);
+  const [previewSupported, setPreviewSupported] = useState<boolean | null>(null);
+  const [previewPort, setPreviewPort] = useState<{ port: number; url: string } | null>(null);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState<string | null>(null);
+  const [portQuery, setPortQuery] = useState('');
+  const [manualPort, setManualPort] = useState('');
+  const [manualPortName, setManualPortName] = useState('');
+  const [manualPorts, setManualPorts] = useState<WorkspacePort[]>([]);
+
+  const loadPreviewState = useCallback(async () => {
+    if (!projectId) {
+      setPreviewSupported(null);
+      return;
+    }
+    try {
+      const state = await getPreviewState(projectId);
+      setPreviewSupported(state.supported);
+      setPreviewError(null);
+    } catch (err) {
+      setPreviewSupported(false);
+      setPreviewError(err instanceof ApiError ? err.message : 'Could not inspect the application preview.');
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    if (bottomTab === 'ports') void loadPreviewState();
+  }, [bottomTab, loadPreviewState]);
+
+  const handleStartPreview = async () => {
+    if (!projectId || previewLoading) return;
+    setPreviewLoading(true);
+    setPreviewError(null);
+    try {
+      const result = await startPreview(projectId, 'original');
+      setPreviewPort({ port: result.hostPort, url: result.url });
+      setPreviewSupported(true);
+    } catch (err) {
+      setPreviewError(err instanceof ApiError ? err.message : 'Could not start the application preview.');
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  const handleStopPreview = async () => {
+    if (!projectId || previewLoading) return;
+    setPreviewLoading(true);
+    try {
+      await stopPreview(projectId);
+      setPreviewPort(null);
+    } catch (err) {
+      setPreviewError(err instanceof ApiError ? err.message : 'Could not stop the application preview.');
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  const addManualPort = () => {
+    const port = Number.parseInt(manualPort, 10);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) return;
+    const id = `manual-${port}`;
+    setManualPorts(prev => [
+      ...prev.filter(entry => entry.port !== port),
+      {
+        id,
+        port,
+        name: manualPortName.trim() || `Port ${port}`,
+        description: 'Manually forwarded workspace port',
+        source: 'Manual',
+        protocol: 'http' as const,
+        browser: true,
+        visibility: 'private' as const,
+        url: getWorkspacePortUrl(port),
+      },
+    ]);
+    setManualPort('');
+    setManualPortName('');
+  };
+
+  const copyPortAddress = async (port: WorkspacePort) => {
+    await navigator.clipboard.writeText(port.url ?? getWorkspacePortUrl(port.port));
+  };
 
   // --- Editor preference state (driven by the menu bar) ---
   const [wordWrap, setWordWrap] = useState(false);
@@ -709,17 +863,107 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
   // "stick" for the commands you run after it, the way a real terminal
   // feels, even though nothing is actually kept running between calls.
   interface TerminalEntry { command: string; stdout: string; stderr: string; code: number; cwd: string }
+  interface TerminalSession {
+    id: string;
+    name: string;
+    history: TerminalEntry[];
+    input: string;
+    cwd: string;
+    commandHistory: string[];
+    backendId: string | null;
+    outputCursor: number;
+    shell: 'bash' | 'sh';
+  }
   const [terminalHistory, setTerminalHistory] = useState<TerminalEntry[]>([]);
   const [terminalInput, setTerminalInput] = useState('');
   const [terminalRunning, setTerminalRunning] = useState(false);
   const [terminalCwd, setTerminalCwd] = useState('');
   const [terminalCommandHistory, setTerminalCommandHistory] = useState<string[]>([]);
   const terminalHistoryIndexRef = useRef<number | null>(null);
+  const [terminalSessions, setTerminalSessions] = useState<TerminalSession[]>([
+    { id: 'terminal-1', name: 'Terminal 1', history: [], input: '', cwd: '', commandHistory: [], backendId: null, outputCursor: 0, shell: 'bash' },
+  ]);
+  const [activeTerminalId, setActiveTerminalId] = useState('terminal-1');
+  const [terminalShell, setTerminalShell] = useState<'bash' | 'sh'>('bash');
+  const [renamingTerminalId, setRenamingTerminalId] = useState<string | null>(null);
+  const [terminalNameInput, setTerminalNameInput] = useState('');
+  const [terminalProcessCount, setTerminalProcessCount] = useState(0);
+  const [detectedPorts, setDetectedPorts] = useState<WorkspacePort[]>([]);
   const [debugConsoleInput, setDebugConsoleInput] = useState('');
   const [debugConsoleHistory, setDebugConsoleHistory] = useState<string[]>([]);
   const [debugConsoleEntries, setDebugConsoleEntries] = useState<Array<{ id: string; level: 'info' | 'stdout' | 'stderr' | 'error'; text: string; timestamp: string }>>([]);
   const terminalEndRef = useRef<HTMLDivElement>(null);
   const debugConsoleEndRef = useRef<HTMLDivElement>(null);
+
+  const saveActiveTerminalSession = useCallback(() => {
+    setTerminalSessions(prev => prev.map(session => session.id === activeTerminalId ? {
+      ...session,
+      history: terminalHistory,
+      input: terminalInput,
+      cwd: terminalCwd,
+      commandHistory: terminalCommandHistory,
+      backendId: session.backendId,
+      outputCursor: session.outputCursor,
+      shell: session.shell,
+    } : session));
+  }, [activeTerminalId, terminalCommandHistory, terminalCwd, terminalHistory, terminalInput]);
+
+  const switchTerminalSession = useCallback((sessionId: string) => {
+    if (sessionId === activeTerminalId || terminalRunning) return;
+    const updatedSessions = terminalSessions.map(session => session.id === activeTerminalId ? {
+      ...session,
+      history: terminalHistory,
+      input: terminalInput,
+      cwd: terminalCwd,
+      commandHistory: terminalCommandHistory,
+    } : session);
+    const target = updatedSessions.find(session => session.id === sessionId);
+    if (!target) return;
+    setTerminalSessions(updatedSessions);
+    setActiveTerminalId(sessionId);
+    setTerminalHistory(target.history);
+    setTerminalInput(target.input);
+    setTerminalCwd(target.cwd);
+    setTerminalCommandHistory(target.commandHistory);
+    setTerminalShell(target.shell);
+    terminalHistoryIndexRef.current = null;
+  }, [activeTerminalId, terminalCommandHistory, terminalCwd, terminalHistory, terminalInput, terminalRunning, terminalSessions]);
+
+  const createTerminalSession = useCallback(() => {
+    if (terminalRunning) return;
+    saveActiveTerminalSession();
+    const nextNumber = terminalSessions.length + 1;
+    const session = { id: `terminal-${Date.now()}`, name: `Terminal ${nextNumber}`, history: [], input: '', cwd: '', commandHistory: [], backendId: null, outputCursor: 0, shell: terminalShell };
+    setTerminalSessions(prev => [...prev, session]);
+    setActiveTerminalId(session.id);
+    setTerminalHistory([]);
+    setTerminalInput('');
+    setTerminalCwd('');
+    setTerminalCommandHistory([]);
+    terminalHistoryIndexRef.current = null;
+  }, [saveActiveTerminalSession, terminalRunning, terminalSessions.length, terminalShell]);
+
+  const closeTerminalSession = useCallback((sessionId: string) => {
+    if (terminalSessions.length === 1 || terminalRunning) return;
+    const closingSession = terminalSessions.find(session => session.id === sessionId);
+    if (closingSession?.backendId && projectId) {
+      void stopPersistentTerminal(projectId, closingSession.backendId);
+    }
+    const remaining = terminalSessions.filter(session => session.id !== sessionId);
+    if (sessionId !== activeTerminalId) {
+      setTerminalSessions(remaining);
+      return;
+    }
+    const next = remaining[remaining.length - 1];
+    setTerminalSessions(remaining);
+    setActiveTerminalId(next.id);
+    setTerminalHistory(next.history);
+    setTerminalInput(next.input);
+    setTerminalCwd(next.cwd);
+    setTerminalCommandHistory(next.commandHistory);
+    setTerminalShell(next.shell);
+    terminalHistoryIndexRef.current = null;
+  }, [activeTerminalId, projectId, terminalRunning, terminalSessions]);
 
   const appendDebugConsoleEntry = useCallback((level: 'info' | 'stdout' | 'stderr' | 'error', text: string) => {
     setDebugConsoleEntries(prev => [
@@ -733,8 +977,65 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
     ]);
   }, []);
 
-  const runTerminalCommand = useCallback(async (command: string) => {
-    if (!projectId || !command.trim() || terminalRunning) return;
+  const refreshTerminalProcesses = useCallback(async () => {
+    if (!projectId) return;
+    try {
+      const processes = await fetchPersistentTerminalProcesses(projectId);
+      setTerminalProcessCount(processes.filter(process => process.running).length);
+      const reconnectable = processes.find(process => process.running);
+      if (reconnectable) {
+        setTerminalSessions(prev => {
+          if (prev.some(session => session.backendId)) return prev;
+          return prev.map((session, index) => index === 0
+            ? { ...session, backendId: reconnectable.id }
+            : session);
+        });
+      }
+    } catch {
+      setTerminalProcessCount(0);
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    if (bottomTab === 'terminal') void refreshTerminalProcesses();
+  }, [bottomTab, refreshTerminalProcesses, terminalRunning]);
+
+  const refreshDetectedPorts = useCallback(async () => {
+    if (!projectId) return;
+    try {
+      const ports = await fetchWorkspacePorts(projectId);
+      setDetectedPorts(ports.map(port => ({
+        id: `detected-${port.port}-${port.pid}`,
+        port: port.port,
+        name: `Process ${port.pid}`,
+        description: port.command,
+        source: 'Detected',
+        protocol: 'http',
+        browser: true,
+        visibility: 'private',
+      })));
+    } catch {
+      setDetectedPorts([]);
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    if (bottomTab === 'ports') void refreshDetectedPorts();
+  }, [bottomTab, refreshDetectedPorts, previewLoading]);
+
+  const interruptActiveTerminal = useCallback(async () => {
+    if (!projectId || !terminalRunning) return;
+    const activeSession = terminalSessions.find(session => session.id === activeTerminalId);
+    if (!activeSession?.backendId) return;
+    try {
+      await interruptPersistentTerminal(projectId, activeSession.backendId);
+    } catch (err) {
+      appendDebugConsoleEntry('error', err instanceof ApiError ? err.message : 'Could not stop the terminal command.');
+    }
+  }, [activeTerminalId, appendDebugConsoleEntry, projectId, terminalRunning, terminalSessions]);
+
+  const runTerminalCommand = useCallback(async (command: string): Promise<WorkspaceExecResult | undefined> => {
+    if (!projectId || !command.trim() || terminalRunning) return undefined;
     const trimmedCommand = command.trim();
     setTerminalInput('');
     setDebugConsoleInput('');
@@ -750,25 +1051,61 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
     setTerminalRunning(true);
     const cwdAtRun = terminalCwd;
     try {
-      const result = await execWorkspaceCommand(projectId, trimmedCommand, cwdAtRun);
-      setTerminalHistory(prev => [...prev, { command: trimmedCommand, stdout: result.stdout, stderr: result.stderr, code: result.code, cwd: cwdAtRun }]);
-      setTerminalCwd(result.cwd);
+      const activeSession = terminalSessions.find(session => session.id === activeTerminalId);
+      let backendId = activeSession?.backendId ?? null;
+      let outputCursor = activeSession?.outputCursor ?? 0;
+      if (!backendId) {
+        const session = await startPersistentTerminal(projectId, activeSession?.shell ?? terminalShell);
+        backendId = session.id;
+        outputCursor = 0;
+        setTerminalSessions(prev => prev.map(item => item.id === activeTerminalId ? { ...item, backendId } : item));
+      }
+
+      const marker = '__BUGFIXER_DONE__';
+      await sendPersistentTerminalInput(
+        projectId,
+        backendId,
+        `${trimmedCommand}\nprintf '\\n${marker}%s|%s\\n' "$?" "$(pwd)"\n`,
+      );
+
+      let combinedOutput = '';
+      let exitCode = 0;
+      let completedCwd = cwdAtRun;
+      for (let attempt = 0; attempt < 60; attempt += 1) {
+        const output = await readPersistentTerminalOutput(projectId, backendId, outputCursor);
+        outputCursor = output.next;
+        combinedOutput += output.chunks.join('');
+        const completion = combinedOutput.match(new RegExp(`${marker}(-?\\d+)\\|([^\\n]+)`));
+        if (completion) {
+          exitCode = Number.parseInt(completion[1], 10);
+          const shellCwd = completion[2];
+          completedCwd = shellCwd.startsWith('/workspace') ? shellCwd.slice('/workspace'.length).replace(/^\//, '') : cwdAtRun;
+          combinedOutput = combinedOutput.replace(completion[0], '').trim();
+          break;
+        }
+        await new Promise(resolve => window.setTimeout(resolve, 50));
+      }
+
+      setTerminalSessions(prev => prev.map(item => item.id === activeTerminalId ? { ...item, outputCursor } : item));
+      setTerminalHistory(prev => [...prev, { command: trimmedCommand, stdout: combinedOutput, stderr: '', code: exitCode, cwd: cwdAtRun }]);
+      setTerminalCwd(completedCwd);
 
       const debugText = [
         `> ${trimmedCommand}`,
-        result.stdout ? result.stdout.trimEnd() : '',
-        result.stderr ? result.stderr.trimEnd() : '',
-        result.code !== 0 ? `exit code ${result.code}` : '',
+        combinedOutput,
+        exitCode !== 0 ? `exit code ${exitCode}` : '',
       ].filter(Boolean).join('\n');
-      if (debugText) appendDebugConsoleEntry(result.code === 0 ? 'stdout' : 'error', debugText);
+      if (debugText) appendDebugConsoleEntry(exitCode === 0 ? 'stdout' : 'error', debugText);
+      return { stdout: combinedOutput, stderr: '', code: exitCode, durationMs: 0, cwd: completedCwd };
     } catch (err) {
       const message = err instanceof ApiError ? err.message : 'Command failed to run.';
       setTerminalHistory(prev => [...prev, { command: trimmedCommand, stdout: '', stderr: message, code: 1, cwd: cwdAtRun }]);
       appendDebugConsoleEntry('error', `> ${trimmedCommand}\n${message}`);
+      return { stdout: '', stderr: message, code: 1, durationMs: 0, cwd: cwdAtRun };
     } finally {
       setTerminalRunning(false);
     }
-  }, [appendDebugConsoleEntry, projectId, terminalCwd, terminalRunning]);
+  }, [activeTerminalId, appendDebugConsoleEntry, projectId, terminalCwd, terminalRunning, terminalSessions]);
 
   const handleRunActiveFile = useCallback(async () => {
     if (!projectId || !activeFile) return;
@@ -820,47 +1157,22 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
     setTaskQuery('');
     setBottomPanelOpen(true);
     setBottomTab('terminal');
-    setTerminalInput('');
-    setDebugConsoleInput('');
-    setTerminalRunning(true);
-    const cwdAtRun = terminalCwd;
     const startedAt = new Date().toISOString();
-
-    try {
-      const result = await execWorkspaceCommand(projectId, task.command, cwdAtRun);
-      setTerminalHistory(prev => [...prev, { command: task.command, stdout: result.stdout, stderr: result.stderr, code: result.code, cwd: cwdAtRun }]);
-      setTerminalCwd(result.cwd);
-
-      const taskRecord = {
-        id: `${task.id}-${Date.now()}`,
-        taskId: task.id,
-        label: task.label,
-        command: task.command,
-        status: result.code === 0 ? 'success' as const : 'failed' as const,
-        exitCode: result.code,
-        timestamp: startedAt,
-      };
-
-      recordTaskResult(taskRecord);
-      appendDebugConsoleEntry(result.code === 0 ? 'stdout' : 'error', `[task:${task.label}]\n> ${task.command}\n${result.stdout || result.stderr || `exit code ${result.code}`}`.trim());
-    } catch (err) {
-      const message = err instanceof ApiError ? err.message : 'Task failed to run.';
-      const failedTask = {
-        id: `${task.id}-${Date.now()}`,
-        taskId: task.id,
-        label: task.label,
-        command: task.command,
-        status: 'failed' as const,
-        exitCode: 1,
-        timestamp: startedAt,
-      };
-      recordTaskResult(failedTask);
-      setTerminalHistory(prev => [...prev, { command: task.command, stdout: '', stderr: message, code: 1, cwd: cwdAtRun }]);
-      appendDebugConsoleEntry('error', `[task:${task.label}]\n> ${task.command}\n${message}`);
-    } finally {
-      setTerminalRunning(false);
+    const result = await runTerminalCommand(task.command);
+    if (!result) return;
+    recordTaskResult({
+      id: `${task.id}-${Date.now()}`,
+      taskId: task.id,
+      label: task.label,
+      command: task.command,
+      status: result.code === 0 ? 'success' : 'failed',
+      exitCode: result.code,
+      timestamp: startedAt,
+    });
+    if (result.code !== 0 && result.stderr) {
+      appendDebugConsoleEntry('error', `[task:${task.label}]\n${result.stderr}`);
     }
-  }, [appendDebugConsoleEntry, projectId, recordTaskResult, terminalCwd]);
+  }, [appendDebugConsoleEntry, projectId, recordTaskResult, runTerminalCommand, terminalCwd]);
 
   const rerunTaskFromHistory = useCallback(async (taskRecord: { id: string; taskId: string; label: string; command: string; status: TaskRunStatus; exitCode: number; timestamp: string; }) => {
     const task: WorkspaceTask = {
@@ -1465,7 +1777,7 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
   };
 
   const handleSelectBottomTab = (tab: string) => {
-    if (tab === 'problems' || tab === 'output' || tab === 'terminal' || tab === 'debug_console') {
+    if (tab === 'problems' || tab === 'output' || tab === 'terminal' || tab === 'debug_console' || tab === 'ports') {
       setBottomTab(tab);
     }
   };
@@ -1638,6 +1950,28 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
     ...workspaceDiagnostics,
   ];
 
+  const visiblePorts = useMemo(() => {
+    const entries: WorkspacePort[] = [
+      ...WORKSPACE_PORTS,
+      ...detectedPorts,
+      ...(previewPort ? [{
+        id: 'application-preview',
+        port: previewPort.port,
+        name: 'Application Preview',
+        description: 'Live project server',
+        source: 'Docker preview',
+        protocol: 'http' as const,
+        browser: true,
+        visibility: 'private' as const,
+        url: previewPort.url,
+      }] : []),
+      ...manualPorts,
+    ];
+    const query = portQuery.trim().toLowerCase();
+    if (!query) return entries;
+    return entries.filter(entry => `${entry.port} ${entry.name} ${entry.source}`.toLowerCase().includes(query));
+  }, [detectedPorts, manualPorts, portQuery, previewPort]);
+
   const symbolResults = useMemo(() => {
     const q = symbolQuery.trim().toLowerCase();
     if (!q) return workspaceSymbols.slice(0, 50);
@@ -1659,6 +1993,7 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
         onToggleRightCopilot={() => setAgentPanelOpen(o => !o)}
         onSelectActivityTab={handleSelectActivityTab}
         onSelectBottomTab={handleSelectBottomTab}
+        onNewTerminal={createTerminalSession}
         onRunActiveFile={handleRunActiveFile}
         onStartDebugging={handleStartDebugging}
         onRunBuildTask={handleRunBuildTask}
@@ -2269,7 +2604,12 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
           </div>
 
         {bottomPanelOpen && (
-          <div className="h-44 shrink-0 bg-[#1E1E1E] border-t border-[#2D2D2D] flex flex-col text-xs">
+          <div className="shrink-0 bg-[#1E1E1E] border-t border-[#2D2D2D] flex flex-col text-xs" style={{ height: bottomPanelHeight }}>
+            <div
+              onPointerDown={event => beginPanelResize('bottom', event)}
+              className="h-1 shrink-0 cursor-ns-resize bg-[#2D2D2D] hover:bg-[#007ACC]"
+              title="Drag to resize panel"
+            />
             <div className="flex items-center justify-between border-b border-[#2D2D2D] px-2 shrink-0">
               <div className="flex items-center">
                 {([
@@ -2277,6 +2617,7 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
                   { id: 'output' as const, label: 'Output' },
                   { id: 'debug_console' as const, label: 'Debug Console' },
                   { id: 'terminal' as const, label: 'Terminal' },
+                  { id: 'ports' as const, label: 'Ports' },
                 ]).map(t => (
                   <button
                     key={t.id}
@@ -2374,6 +2715,130 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
                 </div>
               )}
 
+              {bottomTab === 'ports' && (
+                <div className="space-y-1.5">
+                  <div className="flex items-center gap-2 mb-2 text-[#858585]">
+                    <Radio className="w-3.5 h-3.5" />
+                    <span>Development services and application ports</span>
+                  </div>
+                  <div className="flex items-center gap-3 rounded border border-[#2D2D2D] bg-[#202225] px-2.5 py-1.5">
+                    <span className={`w-2 h-2 rounded-full shrink-0 ${previewPort ? 'bg-[#4EC9B0]' : 'bg-[#858585]'}`} />
+                    <div className="min-w-0 flex-1">
+                      <div className="text-[#CCCCCC]">Application preview</div>
+                      <div className="text-[10px] text-[#858585]">
+                        {previewPort ? `Running on forwarded port ${previewPort.port}` : 'Start the detected project server in an isolated container'}
+                      </div>
+                    </div>
+                    {previewPort ? (
+                      <div className="flex items-center gap-2">
+                        <a
+                          href={previewPort.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center gap-1 text-[11px] text-[#4FC1FF] hover:text-white"
+                        >
+                          Open <ExternalLink className="w-3 h-3" />
+                        </a>
+                        <button
+                          type="button"
+                          onClick={() => void handleStopPreview()}
+                          disabled={previewLoading}
+                          className="text-[11px] text-[#F48771] hover:text-white disabled:opacity-50"
+                        >
+                          Stop
+                        </button>
+                      </div>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => void handleStartPreview()}
+                        disabled={previewLoading || !projectId || previewSupported === false}
+                        className="flex items-center gap-1 rounded bg-[#007ACC] px-2 py-1 text-[11px] text-white hover:bg-[#0062A3] disabled:cursor-not-allowed disabled:opacity-50"
+                        title={previewSupported === false ? 'Run analysis first to detect the application start command' : 'Start application preview'}
+                      >
+                        <Play className="w-3 h-3" />
+                        {previewLoading ? 'Starting…' : 'Start'}
+                      </button>
+                    )}
+                  </div>
+                  {previewError && <p className="text-[11px] text-[#F48771]">{previewError}</p>}
+                  {previewSupported === false && !previewError && (
+                    <p className="text-[11px] text-[#858585]">Run project analysis first so the application start command and port can be detected.</p>
+                  )}
+                  <div className="flex items-center gap-2 rounded border border-[#2D2D2D] bg-[#181818] px-2 py-1.5">
+                    <input
+                      value={portQuery}
+                      onChange={event => setPortQuery(event.target.value)}
+                      placeholder="Filter ports"
+                      className="min-w-0 flex-1 bg-transparent text-[11px] text-white outline-none"
+                      aria-label="Filter ports"
+                    />
+                    <span className="text-[10px] text-[#6A6A6A]">{visiblePorts.length} ports</span>
+                  </div>
+                  {visiblePorts.map(entry => (
+                    <div key={entry.id} className="flex items-center gap-2 rounded border border-[#2D2D2D] bg-[#202225] px-2.5 py-1.5">
+                      <span className="w-2 h-2 rounded-full bg-[#4EC9B0] shrink-0" title="Port is configured" />
+                      <span className="w-12 font-mono text-[#D7BA7D]">{entry.port}</span>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2 text-[#CCCCCC]">
+                          <span className="truncate">{entry.name}</span>
+                          <span className="text-[9px] uppercase text-[#6A6A6A]">{entry.protocol}</span>
+                        </div>
+                        <div className="text-[10px] text-[#858585] truncate">{entry.description} · {entry.source} · {entry.visibility}</div>
+                      </div>
+                      {entry.browser && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => void copyPortAddress(entry)}
+                            className="text-[10px] text-[#858585] hover:text-white"
+                            title="Copy forwarded address"
+                          >
+                            Copy
+                          </button>
+                          <a
+                            href={entry.url ?? getWorkspacePortUrl(entry.port)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="flex items-center gap-1 text-[11px] text-[#4FC1FF] hover:text-white"
+                            title={`Open ${entry.name} on port ${entry.port}`}
+                          >
+                            Open <ExternalLink className="w-3 h-3" />
+                          </a>
+                        </>
+                      )}
+                    </div>
+                  ))}
+                  {visiblePorts.length === 0 && <p className="text-[11px] text-[#858585]">No matching ports.</p>}
+                  <div className="flex items-center gap-1.5 pt-1">
+                    <input
+                      value={manualPort}
+                      onChange={event => setManualPort(event.target.value.replace(/\D/g, '').slice(0, 5))}
+                      placeholder="Port"
+                      inputMode="numeric"
+                      className="w-16 rounded border border-[#3A3A3A] bg-[#181818] px-2 py-1 text-[11px] text-white outline-none"
+                      aria-label="Port number"
+                    />
+                    <input
+                      value={manualPortName}
+                      onChange={event => setManualPortName(event.target.value)}
+                      onKeyDown={event => { if (event.key === 'Enter') addManualPort(); }}
+                      placeholder="Label (optional)"
+                      className="min-w-0 flex-1 rounded border border-[#3A3A3A] bg-[#181818] px-2 py-1 text-[11px] text-white outline-none"
+                      aria-label="Port label"
+                    />
+                    <button
+                      type="button"
+                      onClick={addManualPort}
+                      disabled={!manualPort}
+                      className="rounded bg-[#3A3A3A] px-2 py-1 text-[11px] text-[#CCCCCC] hover:bg-[#4A4A4A] disabled:opacity-40"
+                    >
+                      Add Port
+                    </button>
+                  </div>
+                </div>
+              )}
+
               {bottomTab === 'debug_console' && (
                 <div className="flex flex-col h-full font-mono">
                   <div className="flex-1 overflow-y-auto space-y-1 pb-1">
@@ -2452,6 +2917,75 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
 
               {bottomTab === 'terminal' && (
                 <div className="flex flex-col h-full font-mono">
+                  <div className="flex items-center gap-1 mb-2 overflow-x-auto border-b border-[#2D2D2D] pb-1">
+                    {terminalSessions.map(session => (
+                      <div
+                        key={session.id}
+                        className={`flex items-center gap-1 rounded px-2 py-1 text-[11px] shrink-0 ${
+                          activeTerminalId === session.id ? 'bg-[#37373D] text-white' : 'text-[#858585] hover:bg-[#2A2D2E] hover:text-[#CCCCCC]'
+                        }`}
+                      >
+                        {renamingTerminalId === session.id ? (
+                          <input
+                            autoFocus
+                            value={terminalNameInput}
+                            onChange={event => setTerminalNameInput(event.target.value)}
+                            onBlur={() => {
+                              const name = terminalNameInput.trim();
+                              if (name) setTerminalSessions(prev => prev.map(item => item.id === session.id ? { ...item, name } : item));
+                              setRenamingTerminalId(null);
+                            }}
+                            onKeyDown={event => {
+                              if (event.key === 'Enter') event.currentTarget.blur();
+                              if (event.key === 'Escape') setRenamingTerminalId(null);
+                            }}
+                            className="w-20 bg-transparent text-[11px] text-white outline-none"
+                            aria-label="Terminal name"
+                          />
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => switchTerminalSession(session.id)}
+                            onDoubleClick={() => { setRenamingTerminalId(session.id); setTerminalNameInput(session.name); }}
+                            title="Double-click to rename"
+                          >
+                            {session.name}
+                          </button>
+                        )}
+                        {terminalSessions.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={() => closeTerminalSession(session.id)}
+                            className="text-[#6A6A6A] hover:text-white"
+                            title={`Close ${session.name}`}
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                    <select
+                      value={terminalShell}
+                      onChange={event => setTerminalShell(event.target.value as 'bash' | 'sh')}
+                      className="rounded bg-[#2A2D2E] px-1.5 py-1 text-[10px] text-[#CCCCCC] outline-none"
+                      aria-label="Shell for new terminal"
+                    >
+                      <option value="bash">bash</option>
+                      <option value="sh">sh</option>
+                    </select>
+                    <button
+                      type="button"
+                      onClick={createTerminalSession}
+                      disabled={terminalRunning}
+                      className="rounded px-2 py-1 text-[11px] text-[#858585] hover:bg-[#2A2D2E] hover:text-white disabled:opacity-40"
+                      title="Create new terminal"
+                    >
+                      + New Terminal
+                    </button>
+                    <span className="ml-auto text-[10px] text-[#6A6A6A]">
+                      {terminalProcessCount} active process{terminalProcessCount === 1 ? '' : 'es'}
+                    </span>
+                  </div>
                   <div className="mb-2 rounded border border-[#2D2D2D] bg-[#202225] p-2">
                     <div className="flex items-center justify-between mb-1.5">
                       <span className="text-[10px] uppercase tracking-wide text-[#858585]">Recent Tasks</span>
@@ -2550,6 +3084,23 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
                       className="flex-1 bg-transparent text-white outline-none disabled:opacity-50"
                     />
                     {terminalRunning && <Loader2 className="w-3.5 h-3.5 animate-spin text-[#858585]" />}
+                    {terminalRunning && (
+                      <button
+                        type="button"
+                        onClick={() => void interruptActiveTerminal()}
+                        className="rounded bg-[#5A1D1D] px-2 py-1 text-[11px] text-[#F48771] hover:bg-[#7A2929]"
+                      >
+                        Stop
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => void runTerminalCommand(terminalInput)}
+                      disabled={terminalRunning || !projectId || !terminalInput.trim()}
+                      className="rounded bg-[#007ACC] px-2 py-1 text-[11px] text-white hover:bg-[#0062A3] disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      Run
+                    </button>
                   </div>
                 </div>
               )}
@@ -2569,24 +3120,33 @@ export const WorkspaceView: React.FC<WorkspaceViewProps> = ({
         </div>
 
                 {agentPanelOpen && (
-          <AgentPanel
-            projectId={projectId}
-            activeModel={activeModel}
-            activePath={activeFile?.path ?? null}
-            initialPrompt={agentQuickPrompt}
-            onCollapse={() => setAgentPanelOpen(false)}
-            onFileWritten={(path) => {
-              // Refresh the file if it's currently open, and always refresh the tree
-              // (the fix may have created or touched files).
-              setOpenFiles(prev => prev.map(f => (f.path === path ? { ...f } : f)));
-              void loadTree();
-              if (projectId && openFiles.some(f => f.path === path)) {
-                void fetchWorkspaceFile(projectId, path).then(result => {
-                  setOpenFiles(prev => prev.map(f => (f.path === path ? { path, content: result.content, savedContent: result.content } : f)));
-                });
-              }
-            }}
-          />
+          <>
+            <div
+              onPointerDown={event => beginPanelResize('agent', event)}
+              className="w-1 shrink-0 cursor-ew-resize bg-[#2D2D2D] hover:bg-[#007ACC]"
+              title="Drag to resize Agent panel"
+            />
+            <div style={{ width: agentPanelWidth }} className="h-full shrink-0">
+              <AgentPanel
+                projectId={projectId}
+                activeModel={activeModel}
+                activePath={activeFile?.path ?? null}
+                initialPrompt={agentQuickPrompt}
+                onCollapse={() => setAgentPanelOpen(false)}
+                onFileWritten={(path) => {
+                  // Refresh the file if it's currently open, and always refresh the tree
+                  // (the fix may have created or touched files).
+                  setOpenFiles(prev => prev.map(f => (f.path === path ? { ...f } : f)));
+                  void loadTree();
+                  if (projectId && openFiles.some(f => f.path === path)) {
+                    void fetchWorkspaceFile(projectId, path).then(result => {
+                      setOpenFiles(prev => prev.map(f => (f.path === path ? { path, content: result.content, savedContent: result.content } : f)));
+                    });
+                  }
+                }}
+              />
+            </div>
+          </>
         )}
 
         {!agentPanelOpen && (

@@ -154,6 +154,7 @@ export interface IdeMenuBarProps {
   onToggleRightCopilot?: () => void;
   onSelectActivityTab?: (tab: string) => void;
   onSelectBottomTab?: (tab: string) => void;
+  onNewTerminal?: () => void;
   onRunActiveFile?: () => void;
   onStartDebugging?: () => void;
   onRunBuildTask?: () => void;
@@ -183,6 +184,7 @@ export const IdeMenuBar: React.FC<IdeMenuBarProps> = ({
   onToggleRightCopilot,
   onSelectActivityTab,
   onSelectBottomTab,
+  onNewTerminal,
   onRunActiveFile,
   onStartDebugging,
   onRunBuildTask,
@@ -406,6 +408,7 @@ export const IdeMenuBar: React.FC<IdeMenuBarProps> = ({
         { id: 'view_output', label: 'Output', shortcut: 'Ctrl+Shift+U', action: () => { onSelectBottomTab?.('output'); onToggleBottomPanel?.(); } },
         { id: 'view_debug_console', label: 'Debug Console', shortcut: 'Ctrl+Shift+Y', action: () => { onSelectBottomTab?.('debug_console'); onToggleBottomPanel?.(); } },
         { id: 'view_terminal', label: 'Terminal', shortcut: 'Ctrl+`', action: () => { onSelectBottomTab?.('terminal'); onToggleBottomPanel?.(); } },
+        { id: 'view_ports', label: 'Ports', action: () => { onSelectBottomTab?.('ports'); onToggleBottomPanel?.(); } },
         { id: 'sep_v4', label: '', separator: true },
         { id: 'word_wrap', label: 'Word Wrap', shortcut: 'Alt+Z', checked: wordWrap, action: onToggleWordWrap }
       ]
@@ -496,7 +499,7 @@ export const IdeMenuBar: React.FC<IdeMenuBarProps> = ({
       id: 'terminal',
       label: 'Terminal',
       items: [
-        { id: 'new_terminal', label: 'New Terminal', shortcut: 'Ctrl+Shift+`', action: () => { onSelectBottomTab?.('terminal'); } },
+        { id: 'new_terminal', label: 'New Terminal', shortcut: 'Ctrl+Shift+`', action: () => { onSelectBottomTab?.('terminal'); onNewTerminal?.(); } },
         { id: 'split_terminal', label: 'Split Terminal', shortcut: 'Ctrl+Shift+5' },
         { id: 'new_terminal_window', label: 'New Terminal Window', shortcut: 'Ctrl+Shift+Alt+`' },
         { id: 'sep_t1', label: '', separator: true },

@@ -94,6 +94,77 @@ export interface WorkspaceExecResult {
   cwd: string;
 }
 
+export interface PersistentTerminalSession {
+  id: string;
+  workspace: string;
+}
+
+export interface PersistentTerminalOutput {
+  chunks: string[];
+  next: number;
+  running: boolean;
+}
+
+export interface PersistentTerminalProcess {
+  id: string;
+  pid: number;
+  running: boolean;
+}
+
+export interface WorkspacePort {
+  port: number;
+  pid: number;
+  command: string;
+  source: string;
+}
+
+export async function startPersistentTerminal(projectId: string, shell: 'bash' | 'sh' = 'bash'): Promise<PersistentTerminalSession> {
+  const workspaceId = await resolveWorkspaceId(projectId);
+  return apiRequest<PersistentTerminalSession>(`/workspaces/${workspaceId}/terminal`, {
+    method: 'POST',
+    body: { shell },
+  });
+}
+
+export async function sendPersistentTerminalInput(projectId: string, sessionId: string, data: string): Promise<void> {
+  const workspaceId = await resolveWorkspaceId(projectId);
+  await apiRequest<void>(`/workspaces/${workspaceId}/terminal/${sessionId}/input`, {
+    method: 'POST',
+    body: { data },
+  });
+}
+
+export async function readPersistentTerminalOutput(
+  projectId: string,
+  sessionId: string,
+  after: number,
+): Promise<PersistentTerminalOutput> {
+  const workspaceId = await resolveWorkspaceId(projectId);
+  return apiRequest<PersistentTerminalOutput>(
+    `/workspaces/${workspaceId}/terminal/${sessionId}/output?after=${after}`,
+  );
+}
+
+export async function stopPersistentTerminal(projectId: string, sessionId: string): Promise<void> {
+  const workspaceId = await resolveWorkspaceId(projectId);
+  await apiRequest<void>(`/workspaces/${workspaceId}/terminal/${sessionId}`, { method: 'DELETE' });
+}
+
+export async function fetchPersistentTerminalProcesses(projectId: string): Promise<PersistentTerminalProcess[]> {
+  const workspaceId = await resolveWorkspaceId(projectId);
+  return apiRequest<PersistentTerminalProcess[]>(`/workspaces/${workspaceId}/terminal/processes`);
+}
+
+export async function fetchWorkspacePorts(projectId: string): Promise<WorkspacePort[]> {
+  const workspaceId = await resolveWorkspaceId(projectId);
+  return apiRequest<WorkspacePort[]>(`/workspaces/${workspaceId}/ports`);
+}
+
+export async function interruptPersistentTerminal(projectId: string, sessionId: string): Promise<void> {
+  const workspaceId = await resolveWorkspaceId(projectId);
+  await apiRequest<void>(`/workspaces/${workspaceId}/terminal/${sessionId}/interrupt`, { method: 'POST' });
+}
+
 /** cwd: workspace-relative directory to run from (e.g. "backend"), sourced
  * from the previous call's WorkspaceExecResult.cwd. Omit/empty for the
  * workspace root. */

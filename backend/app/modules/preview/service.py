@@ -129,6 +129,7 @@ async def start_preview(db: AsyncSession, owner_id: str, project_id: str, build:
         "url": _public_url(result["hostPort"]),
         "command": project.previewCommand,
         "port": project.previewPort,
+        "hostPort": result["hostPort"],
         "build": build,
         "patchedFileCount": patched_count,
         "fixCount": len(fixes),

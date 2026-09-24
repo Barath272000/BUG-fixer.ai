@@ -26,6 +26,7 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://bugfixai:bugfixai@postgres:5432/bugfixai
       REDIS_URL: redis://redis:6379
+      SANDBOX_HOST_ROOT: ${PWD}/sandbox-work
       CODESPACE_NAME: ${CODESPACE_NAME:-}
       GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN: ${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-}
     command: >
@@ -49,6 +50,7 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://bugfixai:bugfixai@postgres:5432/bugfixai
       REDIS_URL: redis://redis:6379
+      SANDBOX_HOST_ROOT: ${PWD}/sandbox-work
     depends_on:
       - postgres
       - redis
