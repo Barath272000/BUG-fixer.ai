@@ -1,0 +1,1 @@
+"""Central coordination service for live workspace and AI pipeline state."""

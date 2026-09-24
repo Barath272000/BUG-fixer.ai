@@ -62,6 +62,8 @@ def build_cors_origin_regex() -> str:
 async def lifespan(app: FastAPI):
     os.makedirs(settings.STORAGE_ROOT, exist_ok=True)
     os.makedirs(settings.SANDBOX_WORK_ROOT, exist_ok=True)
+    os.makedirs(settings.LIVE_WORKSPACE_ROOT, exist_ok=True)
+    os.makedirs(settings.PIPELINE_SANDBOX_ROOT, exist_ok=True)
     await connect_database()
     yield
     await disconnect_database()
@@ -113,6 +115,7 @@ def create_app() -> FastAPI:
     from app.modules.preview.router import router as preview_router
     from app.modules.github.router import router as github_router
     from app.modules.realtime.router import router as realtime_router
+    from app.modules.orchestrator.router import router as orchestrator_router
 
     app.include_router(auth_router, prefix="/api/v1")
     app.include_router(users_router, prefix="/api/v1")
@@ -130,6 +133,7 @@ def create_app() -> FastAPI:
     app.include_router(preview_router, prefix="/api/v1")
     app.include_router(github_router, prefix="/api/v1")
     app.include_router(realtime_router)  # no /api/v1 prefix: ws(s)://host/realtime
+    app.include_router(orchestrator_router, prefix="/api/v1")
 
     # The following modules are converted in later phases and will be
     # mounted here the same way once ready:

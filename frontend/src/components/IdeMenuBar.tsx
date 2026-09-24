@@ -157,6 +157,8 @@ export interface IdeMenuBarProps {
   onNewTerminal?: () => void;
   onRunActiveFile?: () => void;
   onStartDebugging?: () => void;
+  onStartIdeCore?: () => void;
+  onStopIdeCore?: () => void;
   onRunBuildTask?: () => void;
   onOpenTaskPicker?: () => void;
   onSaveFile?: () => void;
@@ -171,6 +173,8 @@ export interface IdeMenuBarProps {
   onToggleWordWrap?: () => void;
   autoSave?: boolean;
   onToggleAutoSave?: () => void;
+  orchestratorState?: 'live' | 'staging';
+  onChangeOrchestratorState?: (state: 'live' | 'staging') => void;
 }
 
 export const IdeMenuBar: React.FC<IdeMenuBarProps> = ({
@@ -187,6 +191,8 @@ export const IdeMenuBar: React.FC<IdeMenuBarProps> = ({
   onNewTerminal,
   onRunActiveFile,
   onStartDebugging,
+  onStartIdeCore,
+  onStopIdeCore,
   onRunBuildTask,
   onOpenTaskPicker,
   onSaveFile,
@@ -201,6 +207,8 @@ export const IdeMenuBar: React.FC<IdeMenuBarProps> = ({
   onToggleWordWrap,
   autoSave = true,
   onToggleAutoSave,
+  orchestratorState = 'live',
+  onChangeOrchestratorState,
 }) => {
   const [activeMenu, setActiveMenu] = useState<string | null>(null);
   const [activeSubmenu, setActiveSubmenu] = useState<string | null>(null);
@@ -410,7 +418,16 @@ export const IdeMenuBar: React.FC<IdeMenuBarProps> = ({
         { id: 'view_terminal', label: 'Terminal', shortcut: 'Ctrl+`', action: () => { onSelectBottomTab?.('terminal'); onToggleBottomPanel?.(); } },
         { id: 'view_ports', label: 'Ports', action: () => { onSelectBottomTab?.('ports'); onToggleBottomPanel?.(); } },
         { id: 'sep_v4', label: '', separator: true },
-        { id: 'word_wrap', label: 'Word Wrap', shortcut: 'Alt+Z', checked: wordWrap, action: onToggleWordWrap }
+        { id: 'word_wrap', label: 'Word Wrap', shortcut: 'Alt+Z', checked: wordWrap, action: onToggleWordWrap },
+        {
+          id: 'workspace_state',
+          label: 'Workspace State',
+          hasSubmenu: true,
+          submenuItems: [
+            { id: 'live_workspace', label: 'Live Workspace', checked: orchestratorState === 'live', action: () => onChangeOrchestratorState?.('live') },
+            { id: 'pipeline_sandbox', label: 'Pipeline Sandbox', checked: orchestratorState === 'staging', action: () => onChangeOrchestratorState?.('staging') },
+          ],
+        }
       ]
     },
     {
@@ -468,6 +485,8 @@ export const IdeMenuBar: React.FC<IdeMenuBarProps> = ({
         { id: 'run_no_debugging', label: 'Run Without Debugging', shortcut: 'Ctrl+F5', action: onRunActiveFile },
         { id: 'stop_debugging', label: 'Stop Debugging', shortcut: 'Shift+F5' },
         { id: 'restart_debugging', label: 'Restart Debugging', shortcut: 'Ctrl+Shift+F5', action: onRunActiveFile },
+        { id: 'start_ide_core', label: 'Start IDE Core (Native)', action: onStartIdeCore },
+        { id: 'stop_ide_core', label: 'Stop IDE Core', action: onStopIdeCore },
         { id: 'sep_r1', label: '', separator: true },
         { id: 'open_configs', label: 'Open Configurations', action: onOpenTaskPicker },
         { id: 'add_config', label: 'Add Configuration...', action: onOpenTaskPicker },
