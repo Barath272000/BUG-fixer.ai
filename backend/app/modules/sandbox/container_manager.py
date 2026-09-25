@@ -89,6 +89,48 @@ async def start_preview_container(workspace: str, command: str, language: str, c
     return {"ok": True, "hostPort": host_port, "containerName": name}
 
 
+async def start_workspace_container(workspace: str, name: str, language: str | None = None) -> dict:
+    """Starts (or reuses) a LONG-RUNNING container backing the Workspace
+    IDE's interactive terminal sessions for one project.
+
+    Unlike execute_in_podman (one-shot, --rm per command), an interactive
+    shell needs a container that stays alive across multiple commands and
+    multiple terminal tabs -- terminal_manager.py calls this once per
+    workspace and then `podman exec`s into it for each session, instead of
+    spawning /bin/bash directly on the host. Uses the same slirp4netns
+    rootless network as start_preview_container (an interactive dev
+    terminal needs real outbound network for installs, unlike the
+    pipeline's --network none sandbox) and --userns keep-id so files the
+    shell writes into the bind-mounted workspace come back host-owned,
+    matching every other Podman entry point in this module. Idempotent:
+    if a container with this name is already running, it's reused as-is
+    rather than restarted, so multiple terminal tabs for the same project
+    share one container.
+    """
+    if await is_container_running(name):
+        return {"ok": True, "containerName": name, "alreadyRunning": True}
+
+    image = image_for_language(language)
+    args = [
+        "podman", "run", "-d", "--rm",
+        "--name", name,
+        "--network", "slirp4netns:allow_host_loopback=true",
+        "--cpus", str(sandbox_limits.cpu),
+        "--memory", sandbox_limits.memory,
+        "--pids-limit", str(sandbox_limits.pids),
+        "--userns", "keep-id",
+        "-v", f"{workspace}:/workspace:Z",
+        "-w", "/workspace",
+        image,
+        "sleep", "infinity",
+    ]
+    proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    _, stderr_b = await proc.communicate()
+    if proc.returncode != 0:
+        return {"ok": False, "error": stderr_b.decode(errors="replace").strip() or "podman run failed"}
+    return {"ok": True, "containerName": name, "alreadyRunning": False}
+
+
 async def execute_in_podman(
     workspace: str,
     command: str,

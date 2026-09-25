@@ -63,7 +63,8 @@ async def start_terminal(
     db: AsyncSession = Depends(get_db),
 ):
     workspace = await workspace_for(db, current_user.id, workspace_id)
-    session = await terminal_manager.start(workspace.rootPath, (payload or TerminalStartRequest()).shell)
+    language = workspace.project.language if workspace.project else None
+    session = await terminal_manager.start(workspace.rootPath, (payload or TerminalStartRequest()).shell, language)
     return TerminalSessionResponse(id=session.id, workspace=workspace_id)
 
 
