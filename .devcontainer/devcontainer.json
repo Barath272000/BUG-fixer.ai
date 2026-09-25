@@ -4,14 +4,8 @@
   "features": {
     "ghcr.io/devcontainers/features/node:1": {
       "version": "20"
-    },
-    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
-      "moby": false
     }
   },
-  "mounts": [
-    "source=/var/run/docker.sock,target=/var/run/docker.sock,type=bind"
-  ],
   "forwardPorts": [3000, 4000, 5432, 6379],
   "portsAttributes": {
     "3000": { "label": "Frontend (Vite)", "visibility": "public", "onAutoForward": "notify" },
@@ -27,5 +21,5 @@
     "--device=/dev/fuse",
     "--device=/dev/net/tun"
   ],
-  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y podman uidmap slirp4netns fuse-overlayfs && pip install -r backend/requirements.txt && cd frontend && npm install"
+  "postCreateCommand": "bash .devcontainer/setup-podman.sh"
 }

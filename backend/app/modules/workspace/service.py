@@ -134,10 +134,10 @@ async def create_folder(db: AsyncSession, user_id: str, workspace_id: str, path:
     return {"path": trimmed}
 
 
-# --- Terminal: runs inside the Docker sandbox module (app.modules.sandbox). ---
+# --- Terminal: runs inside the Podman sandbox module (app.modules.sandbox). ---
 #
 # Each command still runs in its own fresh, disposable container (see
-# container_manager.execute_in_docker: `docker run --rm ...`) -- there is no
+# container_manager.execute_in_podman: `podman run --rm ...`) -- there is no
 # long-lived shell process to keep state in. To still make `cd` feel
 # persistent across commands the way a real terminal does, every exec:
 #   1. cd's into the *previous* result's ending directory before running the
@@ -188,12 +188,12 @@ async def exec_command(db: AsyncSession, user_id: str, workspace_id: str, comman
             extra_env={"BF_START_CWD": start_cwd},
         )
     except FileNotFoundError as exc:
-        # `docker` CLI isn't installed / on PATH in this environment.
+        # `podman` CLI isn't installed / on PATH in this environment.
         raise AppError(
             503,
             "SANDBOX_UNAVAILABLE",
-            "The sandboxed terminal needs Docker on the server (and /var/run/docker.sock mounted "
-            "into the backend/worker container, per docker-compose.yml). Docker isn't reachable here.",
+            "The sandboxed terminal needs rootless Podman on the server (see "
+            ".devcontainer/setup-podman.sh / scripts/verify-podman-sandbox.sh). Podman isn't reachable here.",
         ) from exc
     except OSError as exc:
         raise AppError(503, "SANDBOX_UNAVAILABLE", f"Could not start the sandbox container: {exc}") from exc

@@ -11,10 +11,12 @@ and a simple readiness check). mongodb/redis detection exists
 returns None for those and the caller logs the gap rather than silently
 proceeding as if a database were available.
 
-Uses a dedicated user-defined Docker network per run: the default `bridge`
-network (what start_preview_container uses) does NOT support container-name
-DNS resolution between containers, so the sandbox's one-shot containers
-couldn't reach a sidecar by hostname on it. A user-defined network does.
+Uses a dedicated user-defined Podman network per run: rootless Podman has
+no "bridge" network by default (see container_manager.py's Preview
+container, which uses slirp4netns instead), and even a rootful bridge
+network does not support container-name DNS resolution the way a
+user-defined one does -- so the sandbox's one-shot containers couldn't
+reach a sidecar by hostname without a network created just for this run.
 """
 import asyncio
 import time
@@ -57,7 +59,7 @@ async def _run(*args: str) -> tuple[int, str, str]:
 async def _wait_ready(container: str, ready_cmd: list[str]) -> bool:
     deadline = time.monotonic() + _READY_TIMEOUT_S
     while time.monotonic() < deadline:
-        code, _out, _err = await _run("docker", "exec", container, *ready_cmd)
+        code, _out, _err = await _run("podman", "exec", container, *ready_cmd)
         if code == 0:
             return True
         await asyncio.sleep(_READY_POLL_INTERVAL_S)
@@ -78,18 +80,18 @@ async def start_database_sidecar(db_type: str, run_id: str) -> dict | None:
     network = _network_name(run_id)
     container = _container_name(run_id)
 
-    code, _out, err = await _run("docker", "network", "create", network)
+    code, _out, err = await _run("podman", "network", "create", network)
     if code != 0 and "already exists" not in err:
         return None
 
-    run_args = ["docker", "run", "-d", "--rm", "--name", container, "--network", network]
+    run_args = ["podman", "run", "-d", "--rm", "--name", container, "--network", network, "--userns", "keep-id"]
     for key, value in spec["env"].items():
         run_args += ["-e", f"{key}={value}"]
     run_args.append(spec["image"])
 
     code, _out, err = await _run(*run_args)
     if code != 0:
-        await _run("docker", "network", "rm", network)
+        await _run("podman", "network", "rm", network)
         return None
 
     ready = await _wait_ready(container, spec["ready_cmd"])
@@ -108,12 +110,12 @@ async def start_database_sidecar(db_type: str, run_id: str) -> dict | None:
 async def stop_database_sidecar(run_id: str) -> None:
     container = _container_name(run_id)
     network = _network_name(run_id)
-    await _run("docker", "stop", "-t", "2", container)
+    await _run("podman", "stop", "-t", "2", container)
     # -d --rm already removes the container on stop; the network needs an
     # explicit rm and a short retry since Docker can take a moment to fully
     # detach the just-stopped container from it.
     for _ in range(5):
-        code, _out, err = await _run("docker", "network", "rm", network)
+        code, _out, err = await _run("podman", "network", "rm", network)
         if code == 0 or "not found" in err:
             return
         await asyncio.sleep(1)

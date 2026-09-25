@@ -189,7 +189,7 @@ async def _check_application_starts(
     started = await start_preview_container(work_root, project.previewCommand, language, project.previewPort or 8000, container_name)
 
     if not started.get("ok"):
-        # Exited immediately -- container_manager already tried `docker port`
+        # Exited immediately -- container_manager already tried `podman port`
         # and failed, meaning the process never bound anything.
         error = await record_error(
             db, project_id, f"Application failed to start: {project.previewCommand}",
@@ -205,7 +205,7 @@ async def _check_application_starts(
 
     try:
         # Give it a moment to crash on boot before we call it "started" --
-        # a container can be `docker run -d` successfully and still crash
+        # a container can be `podman run -d` successfully and still crash
         # a second later (e.g. an unhandled exception right after bind()).
         await asyncio.sleep(3)
         still_running = await is_container_running(container_name)

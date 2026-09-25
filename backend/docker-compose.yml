@@ -26,7 +26,6 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://bugfixai:bugfixai@postgres:5432/bugfixai
       REDIS_URL: redis://redis:6379
-      SANDBOX_HOST_ROOT: ${PWD}/sandbox-work
       CODESPACE_NAME: ${CODESPACE_NAME:-}
       GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN: ${GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN:-}
     command: >
@@ -36,6 +35,19 @@ services:
       - redis
     ports:
       - "4000:4000"
+    # Nested rootless Podman needs these -- same set as .devcontainer's
+    # runArgs. Without them, sandbox/container_manager.py and
+    # orchestrator/pipeline.py's `podman run` calls fail to create a user
+    # namespace at all.
+    cap_add:
+      - SYS_ADMIN
+      - NET_ADMIN
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+    devices:
+      - /dev/fuse
+      - /dev/net/tun
 
   worker:
     build:
@@ -46,10 +58,18 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://bugfixai:bugfixai@postgres:5432/bugfixai
       REDIS_URL: redis://redis:6379
-      SANDBOX_HOST_ROOT: ${PWD}/sandbox-work
     depends_on:
       - postgres
       - redis
+    cap_add:
+      - SYS_ADMIN
+      - NET_ADMIN
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+    devices:
+      - /dev/fuse
+      - /dev/net/tun
 
 volumes:
   postgres_data:

@@ -2,17 +2,42 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# podman/uidmap/slirp4netns/fuse-overlayfs replace docker.io/docker-cli:
+# container_manager.py now shells out to `podman` directly, running nested
+# inside this container rather than talking to an external Docker daemon
+# over a mounted socket -- see .devcontainer/setup-podman.sh for the same
+# setup used in dev, and scripts/verify-podman-sandbox.sh to confirm it
+# works before relying on it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     git \
-    docker.io \
-    docker-cli \
+    podman \
+    uidmap \
+    slirp4netns \
+    fuse-overlayfs \
     unzip \
     && rm -rf /var/lib/apt/lists/*
+
+# `podman run --userns keep-id` (used throughout app/modules/sandbox and
+# app/modules/orchestrator/pipeline.py) only applies when Podman itself is
+# invoked rootless, so the API process needs to run as a real non-root user
+# with a subuid/subgid range allocated to it, not as root.
+RUN useradd --create-home --shell /bin/bash appuser \
+    && usermod --add-subuids 100000-165535 --add-subgids 100000-165535 appuser \
+    && mkdir -p /home/appuser/.config/containers \
+    && printf '[storage]\ndriver = "overlay"\n\n[storage.options.overlay]\nmount_program = "/usr/bin/fuse-overlayfs"\n' \
+       > /home/appuser/.config/containers/storage.conf \
+    && chown -R appuser:appuser /home/appuser/.config
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
+RUN chown -R appuser:appuser /app
 
+USER appuser
+
+# Overridden by docker-compose.yml's `command:` for the api service
+# (alembic upgrade + uvicorn); this CMD only applies if the image is run
+# standalone.
 CMD ["celery", "-A", "app.workers.celery_app", "worker", "--loglevel=info"]
