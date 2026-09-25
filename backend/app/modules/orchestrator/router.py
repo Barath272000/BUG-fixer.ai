@@ -107,6 +107,18 @@ async def stop_pipeline(run_id: str, _: AuthUser = Depends(require_auth)) -> Non
     await orchestrator.publish("pipeline.stopped", {"id": run_id})
 
 
+@router.post("/pipeline/{run_id}/accept", status_code=204)
+async def accept_pipeline(run_id: str, _: AuthUser = Depends(require_auth)) -> None:
+    await pipeline_manager.cleanup_session(run_id)
+    await orchestrator.publish("pipeline.accepted", {"id": run_id})
+
+
+@router.post("/pipeline/{run_id}/reject", status_code=204)
+async def reject_pipeline(run_id: str, _: AuthUser = Depends(require_auth)) -> None:
+    await pipeline_manager.cleanup_session(run_id)
+    await orchestrator.publish("pipeline.rejected", {"id": run_id})
+
+
 async def _proxy_pipeline_preview(request: Request, run_id: str, path: str) -> Response:
     target = pipeline_manager.target(run_id)
     target_url = f"{target}/{path}" if path else target

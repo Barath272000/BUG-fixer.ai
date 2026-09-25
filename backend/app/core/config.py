@@ -51,8 +51,8 @@ class Settings(BaseSettings):
     SANDBOX_WORK_ROOT: str = str(_BACKEND_ROOT / "sandbox-work")
     LIVE_WORKSPACE_ROOT: str = str(_BACKEND_ROOT / "live-workspace")
     PIPELINE_SANDBOX_ROOT: str = str(_BACKEND_ROOT / "pipeline-sandbox")
-    PIPELINE_TMPFS_ROOT: str = "/dev/shm/agis-pipeline"
-    PIPELINE_PREVIEW_PUBLIC_URL: str = ""
+    PIPELINE_TMPFS_ROOT: str = "/tmp/agis_pipeline_sandboxes"
+    PIPELINE_PREVIEW_PUBLIC_URL: str = "/pipeline-preview"
     MAX_UPLOAD_BYTES: int = 524_288_000
     SANDBOX_TIMEOUT_MS: int = 300_000
     SANDBOX_CPU_LIMIT: float = 2

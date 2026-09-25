@@ -7,8 +7,10 @@ import re
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 
-from fastapi import FastAPI
+import httpx
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -100,6 +102,61 @@ def create_app() -> FastAPI:
     @app.get("/api/v1/health")
     async def api_health():
         return {"status": "ok", "service": "bugfixai-backend", "version": "1.0.0"}
+
+    @app.api_route(
+        "/pipeline-preview/{session_id}/{path:path}",
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
+        include_in_schema=False,
+    )
+    async def pipeline_preview_proxy(request: Request, session_id: str, path: str = "") -> Response:
+        from app.common.errors.app_error import AppError
+        from app.modules.orchestrator.pipeline import pipeline_manager
+
+        try:
+            target = pipeline_manager.target(session_id)
+        except AppError:
+            return HTMLResponse(
+                content="<html><body><h1>Pipeline preview unavailable</h1><p>The staging container is not running or is still rebuilding.</p></body></html>",
+                status_code=503,
+                media_type="text/html",
+            )
+
+        target_url = f"{target.rstrip('/')}/{path}" if path else target.rstrip('/')
+        if request.url.query:
+            target_url = f"{target_url}?{request.url.query}"
+
+        headers = {
+            key: value
+            for key, value in request.headers.items()
+            if key.lower() not in {"host", "content-length", "connection"}
+        }
+
+        try:
+            async with httpx.AsyncClient(follow_redirects=False, timeout=30.0) as client:
+                upstream = await client.request(
+                    request.method,
+                    target_url,
+                    content=await request.body(),
+                    headers=headers,
+                )
+        except httpx.HTTPError:
+            return HTMLResponse(
+                content="<html><body><h1>Pipeline preview is rebuilding</h1><p>The sandbox is restarting after a patch update. Please retry in a moment.</p></body></html>",
+                status_code=503,
+                media_type="text/html",
+            )
+
+        response_headers = {
+            key: value
+            for key, value in upstream.headers.items()
+            if key.lower() not in {"content-length", "connection", "transfer-encoding"}
+        }
+        return Response(
+            content=upstream.content,
+            status_code=upstream.status_code,
+            headers=response_headers,
+            media_type=upstream.headers.get("content-type"),
+        )
 
     # --- Route mounting ---
     from app.modules.auth.router import router as auth_router
